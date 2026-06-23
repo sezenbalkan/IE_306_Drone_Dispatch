@@ -11,7 +11,7 @@ from torch import nn
 from drone_dispatch_env.config import Config
 
 
-def obs_to_vector(obs: dict, cfg: Config) -> np.ndarray:
+def obs_to_vector(obs: dict, cfg: Config, normalize_time: bool = False) -> np.ndarray:
     drones = np.asarray(obs["drones"], dtype=np.float32).copy()
     drones[:, 0] /= max(cfg.H - 1, 1)
     drones[:, 1] /= max(cfg.W - 1, 1)
@@ -23,6 +23,8 @@ def obs_to_vector(obs: dict, cfg: Config) -> np.ndarray:
 
     grid = np.asarray(obs["grid"], dtype=np.float32).reshape(-1) / 3.0
     time = np.asarray(obs["time"], dtype=np.float32).reshape(-1)
+    if normalize_time:
+        time /= max(cfg.T_max, 1)
     return np.concatenate([drones.reshape(-1), orders.reshape(-1), grid, time]).astype(np.float32)
 
 
@@ -57,14 +59,19 @@ class QNetwork(nn.Module):
 
 
 class DQNPolicy:
-    def __init__(self, cfg: Config, q_net: QNetwork, device: str = "cpu"):
+    def __init__(self, cfg: Config, q_net: QNetwork, device: str = "cpu", normalize_time: bool = False):
         self.cfg = cfg
         self.q_net = q_net.to(device)
         self.device = torch.device(device)
+        self.normalize_time = normalize_time
         self.q_net.eval()
 
     def q_values(self, obs: dict) -> np.ndarray:
-        x = torch.as_tensor(obs_to_vector(obs, self.cfg), dtype=torch.float32, device=self.device).unsqueeze(0)
+        x = torch.as_tensor(
+            obs_to_vector(obs, self.cfg, self.normalize_time),
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(0)
         with torch.no_grad():
             return self.q_net(x).squeeze(0).cpu().numpy()
 
@@ -110,4 +117,9 @@ def load_policy(path: str | Path, device: str = "cpu") -> DQNPolicy:
         dueling=bool(train_config.get("dueling", False)),
     )
     q_net.load_state_dict(checkpoint["model_state"])
-    return DQNPolicy(cfg, q_net, device=device)
+    return DQNPolicy(
+        cfg,
+        q_net,
+        device=device,
+        normalize_time=bool(train_config.get("normalize_time", False)),
+    )

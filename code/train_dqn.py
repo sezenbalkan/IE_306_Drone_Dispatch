@@ -50,12 +50,16 @@ def epsilon_by_step(step: int, cfg: dict) -> float:
     return start + frac * (end - start)
 
 
-def choose_action(q_net, obs, cfg: Config, eps: float, device: torch.device) -> int:
+def choose_action(q_net, obs, cfg: Config, eps: float, device: torch.device, normalize_time: bool) -> int:
     mask = np.asarray(obs["action_mask"], dtype=bool)
     valid = np.flatnonzero(mask)
     if random.random() < eps:
         return int(np.random.choice(valid))
-    x = torch.as_tensor(obs_to_vector(obs, cfg), dtype=torch.float32, device=device).unsqueeze(0)
+    x = torch.as_tensor(
+        obs_to_vector(obs, cfg, normalize_time),
+        dtype=torch.float32,
+        device=device,
+    ).unsqueeze(0)
     with torch.no_grad():
         q = q_net(x).squeeze(0).cpu().numpy()
     return int(np.argmax(np.where(mask, q, -np.inf)))
@@ -81,6 +85,10 @@ def train(config_path: str):
     optimizer = torch.optim.Adam(q_net.parameters(), lr=float(train_cfg["learning_rate"]))
     loss_fn = nn.SmoothL1Loss()
     replay = ReplayBuffer(int(train_cfg["buffer_size"]))
+    reward_scale = float(train_cfg.get("reward_scale", 1.0))
+    if reward_scale <= 0:
+        raise ValueError("reward_scale must be positive")
+    normalize_time = bool(train_cfg.get("normalize_time", False))
 
     Path(train_cfg["log_path"]).parent.mkdir(parents=True, exist_ok=True)
     Path(train_cfg["weight_path"]).parent.mkdir(parents=True, exist_ok=True)
@@ -102,16 +110,16 @@ def train(config_path: str):
             charge_indices = [env_cfg.charge_index(d) for d in range(env_cfg.n_drones)]
             if np.asarray(obs["action_mask"], dtype=bool)[charge_indices].any():
                 charge_open_steps += 1
-            action = choose_action(q_net, obs, env_cfg, eps, device)
+            action = choose_action(q_net, obs, env_cfg, eps, device, normalize_time)
             action_counts[env_cfg.decode(action)[0]] += 1
             next_obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
 
             replay.add(
-                obs_to_vector(obs, env_cfg),
+                obs_to_vector(obs, env_cfg, normalize_time),
                 action,
-                reward,
-                obs_to_vector(next_obs, env_cfg),
+                reward / reward_scale,
+                obs_to_vector(next_obs, env_cfg, normalize_time),
                 np.asarray(next_obs["action_mask"], dtype=np.float32),
                 done,
             )

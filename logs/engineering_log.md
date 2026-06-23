@@ -35,3 +35,26 @@ Double DQN was trained with the same seed, network, exploration schedule, and 60
 - Depletion increased to 6.67.
 
 Double DQN reduced the extreme charging seen in vanilla DQN but shifted the policy toward no-op, so max-Q overestimation is not the only cause. The next controlled test is the Dueling architecture, which separates state value from action advantages and may help in the 169-action space where many assignment actions are state-dependent.
+
+## Stability check
+
+The three costs were compared directly: random 18.78, DQN 29.39, and Double DQN 37.51. Since both learned policies were worse than random, the next test targeted training stability before adding Dueling.
+
+The visualizer compared DQN and `greedy_nearest` on seed 0. DQN needed 799 recorded decision frames while greedy needed 159. Its reward stream contained -1530 from dropped orders and -150 from depletion. The replay also showed many lost-drone frames and long periods of charging or deferring while orders accumulated.
+
+First change:
+- Reduce learning rate from 0.0005 to 0.0001.
+- Divide rewards stored in replay by 10 while keeping environment rewards and evaluation metrics unchanged.
+- Keep relative reward magnitudes instead of clipping them.
+
+This did not improve the policy. The scaled run produced `cost_per_order = 33.61`, success rate 0.365, 371 charge actions, and 714 no-op actions.
+
+A review of the state vector found that positions, deadlines, and the grid were normalized, but time was still passed to the network as a raw value from 0 to 500. This feature could dominate the other inputs. Time normalization was added as an optional checkpoint setting so old checkpoints keep their original preprocessing.
+
+With `time / T_max`, the same learning rate, reward scale, seed, and 60,000-step budget:
+- `cost_per_order` improved to 22.33.
+- Success rate improved to 0.494.
+- Mean dropped orders fell to 69.33.
+- Episode return improved to -364.50.
+
+Time normalization fixed part of the shared problem, but the policy still did not beat random. The last 100 training episodes still averaged -570.61 and contained 12,899 no-op actions. The next test should target temporal credit assignment instead of another value-head architecture.
