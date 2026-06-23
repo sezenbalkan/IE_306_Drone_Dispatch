@@ -25,3 +25,13 @@ Result after the fix:
 - The final 100 training episodes had a mean return of -693.57, so longer training alone did not produce a useful vanilla DQN policy.
 
 Next test: train Double DQN with the same 60,000-step budget. The fixed budget keeps the comparison fair, and Double DQN directly tests whether max-Q overestimation is contributing to the charge/no-op policy collapse.
+
+## Double DQN check
+
+Double DQN was trained with the same seed, network, exploration schedule, and 60,000-step budget. It did not fix the collapse:
+- `cost_per_order` increased to 37.51.
+- Success rate remained low at 0.382.
+- The policy selected 183 charge actions and 750 no-op actions.
+- Depletion increased to 6.67.
+
+Double DQN reduced the extreme charging seen in vanilla DQN but shifted the policy toward no-op, so max-Q overestimation is not the only cause. The next controlled test is the Dueling architecture, which separates state value from action advantages and may help in the 169-action space where many assignment actions are state-dependent.
