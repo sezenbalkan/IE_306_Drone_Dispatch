@@ -1,0 +1,45 @@
+{
+  "config": "configs/eval_standard.yaml",
+  "seeds": [0, 1, 2],
+  "results": {
+    "random": {
+      "cost_per_order": 18.78035406746031,
+      "success_rate": 0.6527568062228323,
+      "ontime_rate": 0.890079365079365,
+      "mean_delivery_time": 39.175165343915346,
+      "energy_per_order": 0.3147555224867669,
+      "depletion_events": 8.0,
+      "idle_pct": 0.06802855804182396,
+      "charger_utilization": 0.06690761693901064,
+      "n_delivered": 39.666666666666664,
+      "n_dropped": 21.666666666666668,
+      "episode_return": -168.326
+    },
+    "greedy_nearest": {
+      "cost_per_order": 4.570042801915485,
+      "success_rate": 0.8549158221641059,
+      "ontime_rate": 0.902764421909452,
+      "mean_delivery_time": 34.086563025128456,
+      "energy_per_order": 0.2182026060941716,
+      "depletion_events": 4.0,
+      "idle_pct": 0.06667568662830013,
+      "charger_utilization": 0.12737547359538326,
+      "n_delivered": 118.33333333333333,
+      "n_dropped": 20.0,
+      "episode_return": 1183.2566666666671
+    },
+    "milp_rolling": {
+      "cost_per_order": 4.722329311461045,
+      "success_rate": 0.8363957881199261,
+      "ontime_rate": 0.9109105399237051,
+      "mean_delivery_time": 32.511990838055674,
+      "energy_per_order": 0.21530528389326242,
+      "depletion_events": 3.3333333333333335,
+      "idle_pct": 0.06556271150824385,
+      "charger_utilization": 0.1325432733784415,
+      "n_delivered": 118.0,
+      "n_dropped": 23.0,
+      "episode_return": 1172.9980000000005
+    }
+  }
+}
