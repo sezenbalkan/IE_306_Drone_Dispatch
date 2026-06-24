@@ -108,7 +108,25 @@ def train(config_path: str):
     global_step = 0
     train_updates = 0
     episode = 0
-    rows = []
+    fieldnames = [
+        "episode",
+        "step",
+        "episode_return",
+        "cost_per_order",
+        "delivered",
+        "dropped",
+        "epsilon",
+        "loss",
+        "assign_actions",
+        "charge_actions",
+        "noop_actions",
+        "charge_open_steps",
+        "train_updates",
+    ]
+    log_file = open(train_cfg["log_path"], "w", newline="", encoding="utf-8")
+    writer = csv.DictWriter(log_file, fieldnames=fieldnames)
+    writer.writeheader()
+    log_file.flush()
     total_steps = int(train_cfg["total_steps"])
     while global_step < total_steps:
         obs, _ = env.reset(seed=seed * 100000 + episode)
@@ -184,54 +202,33 @@ def train(config_path: str):
                 break
 
         cost_per_order = episode_cost(env.stats)
-        rows.append(
-            {
-                "episode": episode,
-                "step": global_step,
-                "episode_return": ep_return,
-                "cost_per_order": cost_per_order,
-                "delivered": env.stats["delivered"],
-                "dropped": env.stats["dropped"],
-                "epsilon": epsilon_by_step(global_step, train_cfg),
-                "loss": last_loss,
-                "assign_actions": action_counts["assign"],
-                "charge_actions": action_counts["charge"],
-                "noop_actions": action_counts["noop"],
-                "charge_open_steps": charge_open_steps,
-                "train_updates": train_updates,
-            }
-        )
+        row = {
+            "episode": episode,
+            "step": global_step,
+            "episode_return": ep_return,
+            "cost_per_order": cost_per_order,
+            "delivered": env.stats["delivered"],
+            "dropped": env.stats["dropped"],
+            "epsilon": epsilon_by_step(global_step, train_cfg),
+            "loss": last_loss,
+            "assign_actions": action_counts["assign"],
+            "charge_actions": action_counts["charge"],
+            "noop_actions": action_counts["noop"],
+            "charge_open_steps": charge_open_steps,
+            "train_updates": train_updates,
+        }
+        writer.writerow(row)
+        log_file.flush()
         if episode % print_every_episodes == 0 or global_step >= total_steps:
             print(
                 f"episode={episode} step={global_step} return={ep_return:.2f} "
-                f"cost={cost_per_order:.2f} epsilon={rows[-1]['epsilon']:.3f} "
+                f"cost={cost_per_order:.2f} epsilon={row['epsilon']:.3f} "
                 f"loss={last_loss} charge={action_counts['charge']}/{charge_open_steps} "
                 f"updates={train_updates}"
             )
         episode += 1
 
-    with open(train_cfg["log_path"], "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "episode",
-                "step",
-                "episode_return",
-                "cost_per_order",
-                "delivered",
-                "dropped",
-                "epsilon",
-                "loss",
-                "assign_actions",
-                "charge_actions",
-                "noop_actions",
-                "charge_open_steps",
-                "train_updates",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(rows)
-
+    log_file.close()
     save_checkpoint(train_cfg["weight_path"], env_cfg, q_net, train_cfg)
 
 
