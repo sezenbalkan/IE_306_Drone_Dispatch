@@ -254,3 +254,16 @@ Oral-defense caveat (unchanged): the 1M checkpoint is validation-selected on see
 0,1,2; grading uses one fixed policy on held-out seeds/config, and the observed
 late divergence means the selected checkpoint carries transfer risk. We submit the
 1M checkpoint as the best stable point, not the final-step weights.
+
+## 3-seed sonuçlar (seeds 0,1,2, mean±std)
+
+Eğitim 3 farklı seed'le tekrarlandı (deliverable #3: tek şanslı koşu değil).
+Tablo: logs/results_seeds.md. Özet (best cost_per_order, mean±std):
+- DQN n=3 600k: 13.87 ± 0.71
+- Dueling n=3 600k: 13.17 ± 6.43  (yüksek std → seed'ler arası kararsız)
+- Double DQN n=3 600k: 9.97 ± 0.18  (çok dar std → tutarlı)
+- Double DQN n=3 3M: 6.39 ± 0.41  (en iyi ve sağlam; tek şanslı koşu değil)
+
+Önemli: 3M'de FINAL ağırlıkların std'si çok yüksek (31.0 ± 13.38) çünkü ~2.5M
+sonrası diverjans seed'e göre değişiyor; ama BEST checkpoint sağlam (6.39 ± 0.41).
+Bu, "final ağırlıkları değil, en iyi checkpoint'i submit et" kararını destekliyor.
