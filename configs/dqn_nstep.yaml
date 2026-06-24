@@ -1,0 +1,32 @@
+# DQN + n-step returns (Sutton & Barto Ch. 7), 60k controlled check.
+# Based on configs/dqn_normalized.yaml (the run where time-normalization was the
+# key fix); only n_step + aligned eval logging are added. Do NOT tune to this
+# config: grading uses a held-out config and seeds.
+env_config: configs/eval_standard.yaml
+seed: 0
+total_steps: 60000
+max_steps_per_episode: 1000
+buffer_size: 100000
+batch_size: 128
+gamma: 0.99
+learning_rate: 0.0001
+reward_scale: 10.0
+normalize_time: true
+n_step: 3                 # n-step return horizon (n=1 reduces to plain 1-step DQN)
+hidden_sizes: [256, 256]
+learning_starts: 1000
+train_every: 4
+target_update_every: 1000
+epsilon_start: 1.0
+epsilon_end: 0.05
+epsilon_decay_steps: 40000
+double_dqn: false
+dueling: false
+# Aligned greedy-eval logging. eval_seeds match the released baseline (seeds
+# 0,1,2) so the before/after comparison is apples-to-apples; eval_every=2000
+# gives ~10 eval points in the post-decay window (40k-60k).
+eval_every: 2000
+eval_seeds: [0, 1, 2]
+log_path: logs/dqn_nstep_seed0.csv
+eval_log_path: logs/dqn_nstep_seed0_eval.csv
+weight_path: weights/dqn_nstep_seed0.pt
