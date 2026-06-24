@@ -1,0 +1,33 @@
+# 600k run for results table. Validated base (normalize_time, reward_scale=10,
+# lr=1e-4, n_step shown below), seed 0. Do NOT tune to this config.
+env_config: configs/eval_standard.yaml
+seed: 0
+total_steps: 600000
+max_steps_per_episode: 1000
+buffer_size: 100000
+batch_size: 128
+gamma: 0.99
+learning_rate: 0.0001
+reward_scale: 10.0
+normalize_time: true
+n_step: 1
+hidden_sizes:
+- 256
+- 256
+learning_starts: 1000
+train_every: 4
+target_update_every: 1000
+epsilon_start: 1.0
+epsilon_end: 0.05
+epsilon_decay_steps: 40000
+double_dqn: false
+dueling: false
+eval_every: 20000
+eval_seeds:
+- 0
+- 1
+- 2
+log_path: logs/dqn_n1_600k.csv
+eval_log_path: logs/dqn_n1_600k_eval.csv
+weight_path: weights/dqn_n1_600k.pt
+checkpoint_interval: 100000
