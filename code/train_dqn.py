@@ -14,32 +14,63 @@ import yaml
 
 sys.path.append(str(Path(__file__).resolve().parent))
 
-from dqn_agent import build_q_net, obs_to_vector, save_checkpoint
+from dqn_agent import DQNPolicy, build_q_net, obs_to_vector, save_checkpoint
 from drone_dispatch_env.config import Config
 from drone_dispatch_env.env_dispatch import DroneDispatchEnv
+from drone_dispatch_env.evaluate import evaluate
 
 
 class ReplayBuffer:
     def __init__(self, capacity: int):
         self.data = deque(maxlen=capacity)
 
-    def add(self, obs, action, reward, next_obs, next_mask, done):
-        self.data.append((obs, action, reward, next_obs, next_mask, done))
+    def add(self, obs, action, nstep_return, next_obs, next_mask, done, discount):
+        # `nstep_return` is the accumulated discounted reward over the n-step
+        # window; `discount` is gamma**window_len, the factor that multiplies the
+        # bootstrapped value of `next_obs` (the state at the end of the window).
+        self.data.append((obs, action, nstep_return, next_obs, next_mask, done, discount))
 
     def sample(self, batch_size: int):
         batch = random.sample(self.data, batch_size)
-        obs, actions, rewards, next_obs, next_masks, dones = zip(*batch)
+        obs, actions, returns, next_obs, next_masks, dones, discounts = zip(*batch)
         return (
             np.stack(obs),
             np.asarray(actions, dtype=np.int64),
-            np.asarray(rewards, dtype=np.float32),
+            np.asarray(returns, dtype=np.float32),
             np.stack(next_obs),
             np.stack(next_masks),
             np.asarray(dones, dtype=np.float32),
+            np.asarray(discounts, dtype=np.float32),
         )
 
     def __len__(self):
         return len(self.data)
+
+
+# n-step returns (Sutton & Barto, Reinforcement Learning 2nd ed., Ch. 7).
+# Forward view: a transition's target is sum_{k=0}^{m-1} gamma^k * r_{t+k}
+# bootstrapped from the state m steps ahead with factor gamma^m. Windows are
+# truncated at episode boundaries (terminal or T_max timeout) so they never
+# cross episodes. The env is finite-horizon (T_max), so the timeout IS a true
+# terminal: we do not bootstrap past it (done=True), which also matches the
+# existing 1-step convention.
+def emit_nstep(nstep_queue, next_obs_vec, next_mask, done, gamma, flush):
+    """Yield (obs, action, return, next_obs, next_mask, done, discount) tuples.
+
+    When `flush` is False, emit only the oldest transition once the window is
+    full (len == n). When True (episode ended), drain the whole queue, emitting
+    one (progressively shorter) truncated-return transition per remaining item.
+    """
+    while nstep_queue:
+        obs_vec, action, _ = nstep_queue[0]
+        ret = 0.0
+        for k, (_, _, r) in enumerate(nstep_queue):
+            ret += (gamma ** k) * r
+        discount = gamma ** len(nstep_queue)
+        yield (obs_vec, action, ret, next_obs_vec, next_mask, done, discount)
+        nstep_queue.popleft()
+        if not flush:
+            break
 
 
 def epsilon_by_step(step: int, cfg: dict) -> float:
@@ -68,6 +99,31 @@ def choose_action(q_net, obs, cfg: Config, eps: float, device: torch.device, nor
 def episode_cost(stats: dict) -> float:
     cost = stats["energy"] + stats["late_cost"] + stats["drop_cost"] + stats["depletion_cost"]
     return cost / max(stats["delivered"], 1)
+
+
+def greedy_eval(q_net, env_cfg: Config, device, normalize_time: bool, seeds):
+    """Greedy (no-epsilon) evaluation via the shipped evaluate() util.
+
+    Returns mean cost_per_order, mean episode_return (the aligned pair) plus the
+    action mix, so we can confirm the optimized return and the graded cost move
+    together and watch whether the passive charge/no-op collapse shrinks.
+    """
+    was_training = q_net.training
+    policy = DQNPolicy(env_cfg, q_net, device=str(device), normalize_time=normalize_time)
+    mean = evaluate(policy, env_cfg, seeds)["mean"]
+    counts = {"assign": 0, "charge": 0, "noop": 0}
+    for seed in seeds:
+        env = DroneDispatchEnv(env_cfg)
+        obs, _ = env.reset(seed=int(seed))
+        done = False
+        while not done:
+            action = policy.act(obs)
+            counts[env_cfg.decode(action)[0]] += 1
+            obs, _, term, trunc, _ = env.step(action)
+            done = term or trunc
+    if was_training:
+        q_net.train()
+    return mean["cost_per_order"], mean["episode_return"], counts
 
 
 def checkpoint_path(weight_path: str, step: int) -> Path:
@@ -101,6 +157,10 @@ def train(config_path: str):
     normalize_time = bool(train_cfg.get("normalize_time", False))
     checkpoint_interval = int(train_cfg.get("checkpoint_interval", 0))
     print_every_episodes = max(int(train_cfg.get("print_every_episodes", 1)), 1)
+    n_step = max(int(train_cfg.get("n_step", 1)), 1)
+    gamma = float(train_cfg["gamma"])
+    eval_every = int(train_cfg.get("eval_every", 0))
+    eval_seeds = [int(s) for s in train_cfg.get("eval_seeds", [])]
 
     Path(train_cfg["log_path"]).parent.mkdir(parents=True, exist_ok=True)
     Path(train_cfg["weight_path"]).parent.mkdir(parents=True, exist_ok=True)
@@ -127,6 +187,22 @@ def train(config_path: str):
     writer = csv.DictWriter(log_file, fieldnames=fieldnames)
     writer.writeheader()
     log_file.flush()
+
+    # Aligned greedy-eval log: episode_return (optimized) and cost_per_order
+    # (graded) side by side, plus the action mix, sampled every `eval_every` steps.
+    eval_writer = None
+    eval_file = None
+    if eval_every > 0 and eval_seeds:
+        eval_path = train_cfg.get("eval_log_path", str(Path(train_cfg["log_path"]).with_name(
+            Path(train_cfg["log_path"]).stem + "_eval.csv")))
+        eval_file = open(eval_path, "w", newline="", encoding="utf-8")
+        eval_writer = csv.DictWriter(eval_file, fieldnames=[
+            "step", "epsilon", "eval_cost_per_order", "eval_episode_return",
+            "eval_assign", "eval_charge", "eval_noop",
+        ])
+        eval_writer.writeheader()
+        eval_file.flush()
+
     total_steps = int(train_cfg["total_steps"])
     while global_step < total_steps:
         obs, _ = env.reset(seed=seed * 100000 + episode)
@@ -135,6 +211,7 @@ def train(config_path: str):
         done = False
         action_counts = {"assign": 0, "charge": 0, "noop": 0}
         charge_open_steps = 0
+        nstep_queue = deque()  # holds (obs_vec, action, scaled_reward) within one episode
         for _ in range(int(train_cfg["max_steps_per_episode"])):
             eps = epsilon_by_step(global_step, train_cfg)
             charge_indices = [env_cfg.charge_index(d) for d in range(env_cfg.n_drones)]
@@ -145,14 +222,17 @@ def train(config_path: str):
             next_obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
 
-            replay.add(
-                obs_to_vector(obs, env_cfg, normalize_time),
-                action,
-                reward / reward_scale,
-                obs_to_vector(next_obs, env_cfg, normalize_time),
-                np.asarray(next_obs["action_mask"], dtype=np.float32),
-                done,
-            )
+            nstep_queue.append((obs_to_vector(obs, env_cfg, normalize_time), action, reward / reward_scale))
+            next_vec = obs_to_vector(next_obs, env_cfg, normalize_time)
+            next_mask = np.asarray(next_obs["action_mask"], dtype=np.float32)
+            # Emit completed n-step windows. On episode end, flush the whole queue
+            # (truncated returns); otherwise emit the oldest once the window is full.
+            if done:
+                for tr in emit_nstep(nstep_queue, next_vec, next_mask, True, gamma, flush=True):
+                    replay.add(*tr)
+            elif len(nstep_queue) == n_step:
+                for tr in emit_nstep(nstep_queue, next_vec, next_mask, False, gamma, flush=False):
+                    replay.add(*tr)
             obs = next_obs
             ep_return += reward
             global_step += 1
@@ -161,13 +241,14 @@ def train(config_path: str):
                 len(replay) >= int(train_cfg["learning_starts"])
                 and global_step % int(train_cfg["train_every"]) == 0
             ):
-                b_obs, b_actions, b_rewards, b_next_obs, b_next_masks, b_dones = replay.sample(int(train_cfg["batch_size"]))
+                b_obs, b_actions, b_returns, b_next_obs, b_next_masks, b_dones, b_disc = replay.sample(int(train_cfg["batch_size"]))
                 obs_t = torch.as_tensor(b_obs, dtype=torch.float32, device=device)
                 actions_t = torch.as_tensor(b_actions, dtype=torch.int64, device=device).unsqueeze(1)
-                rewards_t = torch.as_tensor(b_rewards, dtype=torch.float32, device=device)
+                returns_t = torch.as_tensor(b_returns, dtype=torch.float32, device=device)
                 next_obs_t = torch.as_tensor(b_next_obs, dtype=torch.float32, device=device)
                 next_masks_t = torch.as_tensor(b_next_masks, dtype=torch.bool, device=device)
                 dones_t = torch.as_tensor(b_dones, dtype=torch.float32, device=device)
+                disc_t = torch.as_tensor(b_disc, dtype=torch.float32, device=device)
 
                 q = q_net(obs_t).gather(1, actions_t).squeeze(1)
                 with torch.no_grad():
@@ -177,7 +258,8 @@ def train(config_path: str):
                         next_q = target_net(next_obs_t).gather(1, next_actions).squeeze(1)
                     else:
                         next_q = target_net(next_obs_t).masked_fill(~next_masks_t, -1e9).max(dim=1).values
-                    target = rewards_t + float(train_cfg["gamma"]) * (1.0 - dones_t) * next_q
+                    # n-step target: accumulated return + gamma**window * bootstrap.
+                    target = returns_t + disc_t * (1.0 - dones_t) * next_q
 
                 loss = loss_fn(q, target)
                 optimizer.zero_grad()
@@ -196,6 +278,25 @@ def train(config_path: str):
                     env_cfg,
                     q_net,
                     train_cfg,
+                )
+
+            if eval_writer is not None and global_step % eval_every == 0:
+                ev_cost, ev_return, ev_counts = greedy_eval(
+                    q_net, env_cfg, device, normalize_time, eval_seeds
+                )
+                eval_writer.writerow({
+                    "step": global_step,
+                    "epsilon": epsilon_by_step(global_step, train_cfg),
+                    "eval_cost_per_order": ev_cost,
+                    "eval_episode_return": ev_return,
+                    "eval_assign": ev_counts["assign"],
+                    "eval_charge": ev_counts["charge"],
+                    "eval_noop": ev_counts["noop"],
+                })
+                eval_file.flush()
+                print(
+                    f"[eval] step={global_step} cost={ev_cost:.2f} return={ev_return:.2f} "
+                    f"assign={ev_counts['assign']} charge={ev_counts['charge']} noop={ev_counts['noop']}"
                 )
 
             if done or global_step >= total_steps:
@@ -229,6 +330,8 @@ def train(config_path: str):
         episode += 1
 
     log_file.close()
+    if eval_file is not None:
+        eval_file.close()
     save_checkpoint(train_cfg["weight_path"], env_cfg, q_net, train_cfg)
 
 
