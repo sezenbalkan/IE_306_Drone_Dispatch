@@ -69,3 +69,15 @@ The benchmark took 46.973 seconds, or about 425.8 environment steps per second. 
 - 6,000,000 steps: 234.9 minutes
 
 Checkpoint evaluation over seeds 0, 1, and 2 improved from `cost_per_order = 60.83` at 10,000 steps to 37.03 at 20,000 steps. Both are still immature policies. A 6,000,000-step run was selected with checkpoints every 500,000 steps. The measured runtime estimate is about 3 hours 55 minutes.
+
+The long run was checked at 3,000,000 steps. Cost over the 500,000-step checkpoints was:
+- 500K: 77.14
+- 1M: 79.73
+- 1.5M: 27.89
+- 2M: 68.31
+- 2.5M: 59.09
+- 3M: 80.66
+
+The best point was still worse than random at 18.78, and performance collapsed again after 1.5M. The policy at 3M selected 1,068 no-op actions over three evaluation seeds and delivered only 25 orders on average. Training was stopped at 3M because the issue is instability, not insufficient interaction.
+
+Stopping also exposed a logging problem: the CSV was written only after a normal training exit. Training now writes and flushes each episode row immediately, so future interrupted long runs retain their learning curve.
