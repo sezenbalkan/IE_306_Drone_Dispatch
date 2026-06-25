@@ -1,0 +1,24 @@
+method: role_c_rollout_planner
+role: C
+selected_depth: 1
+ablation_depths: [0, 1, 2]
+seeds: [0, 1, 2]
+eval_config: configs/eval_standard.yaml
+
+planner_terms:
+  - routed_pickup_distance
+  - delivery_distance
+  - deadline_risk
+  - battery_feasibility
+  - charging_priority
+
+final_result:
+  cost_per_order: 2.923046322049176
+  success_rate: 0.8813705392201858
+  ontime_rate: 0.9815496529985167
+  mean_delivery_time: 28.630149396058485
+  energy_per_order: 0.22509866364697204
+  depletion_events: 1.6666666666666667
+  n_delivered: 126.33333333333333
+  n_dropped: 17.0
+  episode_return: 1515.0046666666674

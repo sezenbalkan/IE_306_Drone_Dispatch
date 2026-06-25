@@ -1,0 +1,12 @@
+{
+  "method": "RoleCRolloutPlanner",
+  "role": "C",
+  "depth": 0,
+  "config": "configs/eval_standard.yaml",
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "note": "No neural weights; this file stores the exact planning settings."
+}

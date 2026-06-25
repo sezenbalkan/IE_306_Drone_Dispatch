@@ -1,0 +1,19 @@
+Role C - Planning Method Results
+
+Method: Rollout-style planning policy
+Final selected depth: 1
+Seeds: 0,1,2
+Config: configs/eval_standard.yaml
+
+Baseline Results:
+- random cost_per_order: 18.7804
+- greedy_nearest cost_per_order: 4.5700
+- milp_rolling cost_per_order: 4.7223
+
+Ablation Results:
+- Role C depth=0 cost_per_order: 4.5700
+- Role C depth=1 cost_per_order: 2.9230
+- Role C depth=2 cost_per_order: 3.3306
+
+Final conclusion:
+The Role C rollout planner with depth=1 achieved the best result. It reduced cost_per_order from 4.5700 for greedy_nearest to 2.9230 on seeds 0,1,2. Depth=1 worked best because it considers pickup distance, delivery distance, deadline risk, and battery feasibility. Depth=2 added a post-delivery charging proxy, but this made the planner slightly too conservative and increased cost_per_order.
