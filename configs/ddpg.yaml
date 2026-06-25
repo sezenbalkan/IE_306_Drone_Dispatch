@@ -1,0 +1,42 @@
+# DDPG on DroneControl-v0 (Role B, continuous control sub-env)
+# Run: python code/role_b/train_ddpg.py --config configs/ddpg.yaml --seed 0
+
+env:
+  H: 20
+  W: 20
+  T_max: 500
+  n_drones: 8
+  k_max: 20
+  lam: 0.3
+  sla_steps: 60
+  neighborhood: 4
+  e_move: 0.01
+  e_idle: 0.001
+  c_rate: 0.05
+  charge_threshold: 0.30
+  n_nofly: 24
+  n_hubs: 4
+  init_soc: 1.0
+  reward:
+    r_delivered: 10.0
+    r_ontime_bonus: 5.0
+    r_late_penalty: -0.1
+    r_dropped: -15.0
+    r_energy: -1.0
+    r_depletion: -50.0
+    r_noop: -0.01
+
+# --- algorithm ---
+actor_lr: 0.0001
+critic_lr: 0.001
+gamma: 0.99
+tau: 0.005
+hidden: 256
+buffer_size: 200000
+batch_size: 256
+warmup_steps: 10000
+noise_sigma: 0.2
+reward_scale: 0.1
+total_steps: 250000
+eval_every_steps: 5000
+eval_seeds: [200, 201, 202, 203, 204]

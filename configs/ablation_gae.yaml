@@ -1,0 +1,46 @@
+# GAE-lambda ablation on REINFORCE+GAE (Role B required ablation)
+# Run: python code/role_b/run_ablation_gae.py --config configs/ablation_gae.yaml
+# Sweeps gae_lambda over `lambdas` x `seeds` with a reduced step budget.
+
+env:
+  H: 20
+  W: 20
+  T_max: 500
+  n_drones: 8
+  k_max: 20
+  lam: 0.3
+  sla_steps: 60
+  neighborhood: 4
+  e_move: 0.01
+  e_idle: 0.001
+  c_rate: 0.05
+  charge_threshold: 0.30
+  n_nofly: 24
+  n_hubs: 4
+  init_soc: 1.0
+  reward:
+    r_delivered: 10.0
+    r_ontime_bonus: 5.0
+    r_late_penalty: -0.1
+    r_dropped: -15.0
+    r_energy: -1.0
+    r_depletion: -50.0
+    r_noop: -0.01
+
+# --- base algorithm: A2C (the GAE lambda is overridden per sweep point) ---
+lr: 0.0007
+gamma: 0.99
+ent_coef: 0.01
+vf_coef: 0.5
+hidden: 64
+max_grad_norm: 0.5
+norm_adv: true
+reward_scale: 0.1
+n_steps: 32
+total_steps: 40000
+eval_every_updates: 100
+val_seeds: [200, 201, 202]
+
+# --- sweep ---
+lambdas: [0.0, 0.9, 0.95, 0.99, 1.0]
+seeds: [0, 1]

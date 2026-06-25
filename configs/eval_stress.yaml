@@ -1,0 +1,28 @@
+# A held-out-style "stress" config to prove the learned policy is dimension-robust:
+# different grid size (24x24 vs 20x20), larger obs window k_max (28 vs 20), more
+# no-fly cells, higher demand, tighter deadlines. n_drones is fixed (fleet size is
+# a fixed strategic decision per the spec). The factored policy's parameters do not
+# depend on k_max / grid size, so the SAME trained weights load and run here.
+H: 24
+W: 24
+T_max: 500
+n_drones: 8
+k_max: 28
+lam: 0.45
+sla_steps: 50
+neighborhood: 4
+e_move: 0.01
+e_idle: 0.001
+c_rate: 0.05
+charge_threshold: 0.30
+n_nofly: 32
+n_hubs: 4
+init_soc: 1.0
+reward:
+  r_delivered: 10.0
+  r_ontime_bonus: 5.0
+  r_late_penalty: -0.1
+  r_dropped: -15.0
+  r_energy: -1.0
+  r_depletion: -50.0
+  r_noop: -0.01
