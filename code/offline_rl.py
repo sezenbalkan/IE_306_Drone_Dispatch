@@ -130,6 +130,8 @@ def main():
     ap.add_argument("--out", default="logs/offline_results.json")
     args = ap.parse_args()
 
+    import random
+    torch.manual_seed(0); np.random.seed(0); random.seed(0)  # reproducibility (spec §10)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"device={device}  data={args.data}")
     data, mean, std = load_pool(args.data, device)
@@ -158,6 +160,13 @@ def main():
     with open("logs/offline_qstats.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["method", "step", "loss", "mean_q", "max_q"])
         w.writeheader(); w.writerows(log)
+
+    # save the submitted offline policy (CQL) + its normalization stats, so
+    # run_all.py can load and evaluate it without retraining (spec: one weight/method)
+    Path("weights").mkdir(exist_ok=True)
+    torch.save({"model_state": nets["cql"].state_dict(), "mean": mean, "std": std,
+                "obs_dim": OBS_DIM, "n_actions": N_ACTIONS, "hidden": HIDDEN},
+               "weights/offline_cql.pt")
 
     print("\n=== OFFLINE RL — cost_per_order (lower better), eval seeds", EVAL_SEEDS, "===")
     for k, v in refs.items():

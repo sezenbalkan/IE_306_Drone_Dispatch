@@ -30,12 +30,38 @@ METHODS = {
     "Dueling DQN n=3": "weights/dueling_dqn_nstep_600k.pt",
 }
 BASELINES = ["random", "greedy_nearest", "milp_rolling"]
+# Joint methods (separate weights). CQL runs on the same centralized env so it
+# joins the main table; MA runs on DroneDispatchMA-v0 and is reported separately.
+CQL_WEIGHTS = "weights/offline_cql.pt"
+MA_WEIGHTS = "weights/ma_idqn.pt"
 
 
 def stats(res: dict):
     cps = [m["cost_per_order"] for m in res["per_seed"]]
     sr = [m["success_rate"] for m in res["per_seed"]]
     return float(np.mean(cps)), float(np.std(cps)), float(np.mean(sr))
+
+
+def load_cql_policy(path, device="cpu"):
+    """Rebuild the offline-CQL eval wrapper from its saved weights + norm stats."""
+    import torch
+    from offline_rl import _Wrapped
+    from dqn_agent import QNetwork
+    ck = torch.load(path, map_location=device, weights_only=False)  # our own file (has numpy stats)
+    net = QNetwork(ck["obs_dim"], ck["n_actions"], ck["hidden"])
+    net.load_state_dict(ck["model_state"])
+    return _Wrapped(net, np.asarray(ck["mean"]), np.asarray(ck["std"]), device)
+
+
+def eval_ma_policy(path, cfg, seeds, device="cpu"):
+    """Eval the shared-param IDQN on the MA env; returns (return, cost, delivered)."""
+    import torch
+    from train_ma_idqn import eval_ma
+    from dqn_agent import QNetwork
+    ck = torch.load(path, map_location=device, weights_only=False)
+    net = QNetwork(ck["obs_dim"], ck["n_actions"], ck["hidden"])
+    net.load_state_dict(ck["model_state"])
+    return eval_ma(net, cfg, device, policy="greedy", seeds=seeds)
 
 
 def main():
@@ -54,6 +80,8 @@ def main():
             rows.append((f"{name} [weights missing]", float("nan"), 0.0, 0.0))
             continue
         rows.append((name, *stats(evaluate(load_policy(wp), cfg, seeds))))
+    if Path(CQL_WEIGHTS).exists():  # joint offline method, same centralized env
+        rows.append(("Offline CQL (joint)", *stats(evaluate(load_cql_policy(CQL_WEIGHTS), cfg, seeds))))
 
     header = f"Eval config = {args.config} | seeds = {seeds} | primary metric = cost_per_order (lower better)"
     lines = [header, "", f"{'policy':24} {'cost/order (mean+/-std)':26} {'success':>8}", "-" * 60]
@@ -62,6 +90,16 @@ def main():
     for name, m, s, sr in rows:
         lines.append(f"{name:24} {m:8.2f} +/- {s:5.2f}        {sr:8.3f}")
         md.append(f"| {name} | {m:.2f} ± {s:.2f} | {sr:.3f} |")
+    # Multi-agent: different env (DroneDispatchMA-v0), reported separately. Its
+    # cost_per_order is reconstructed from the reward stream (see train_ma_idqn).
+    if Path(MA_WEIGHTS).exists():
+        ret, cost, deliv = eval_ma_policy(MA_WEIGHTS, cfg, seeds)
+        ma_line = (f"Multi-agent IDQN (DroneDispatchMA-v0): cost_per_order={cost:.2f} "
+                   f"delivered/ep={deliv:.1f} return={ret:.1f}")
+        lines += ["", "-- joint multi-agent (separate env) --", ma_line]
+        md += ["", f"**Joint multi-agent** (DroneDispatchMA-v0, separate env): "
+               f"cost_per_order = {cost:.2f}, delivered/ep = {deliv:.1f}, return = {ret:.1f}."]
+
     out = "\n".join(lines)
     print(out)
     Path("logs/run_all_table.md").write_text("\n".join(md) + "\n", encoding="utf-8")
