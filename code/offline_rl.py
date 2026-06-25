@@ -48,6 +48,10 @@ def load_pool(path, device):
         act=torch.as_tensor(d["actions"].astype(np.int64), device=device),
         rew=torch.as_tensor(d["rewards"].astype(np.float32), device=device),
         nobs=torch.as_tensor(nobs, device=device),
+        # d4rl / offline-RL convention: a truncation (timeout) is NOT a terminal, so we
+        # bootstrap THROUGH it and exclude `timeouts` from the Bellman backup; only a
+        # true terminal (all drones lost) zeros the bootstrap. The dataset ships a
+        # separate `timeouts` array precisely so it can be excluded here.
         done=torch.as_tensor(d["terminals"].astype(np.float32), device=device),
     )
     return data, mean.astype(np.float32), std.astype(np.float32)
@@ -121,14 +125,32 @@ class _Wrapped:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="offline_pool.npz")
-    ap.add_argument("--steps", type=int, default=40000)
-    ap.add_argument("--bc-steps", type=int, default=15000)
-    ap.add_argument("--batch", type=int, default=256)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--cql-alpha", type=float, default=1.0)
-    ap.add_argument("--out", default="logs/offline_results.json")
+    ap.add_argument("--config", default="configs/offline_cql.yaml",
+                    help="YAML with the hyperparameters (numbers live here, not in code)")
+    ap.add_argument("--data", default=None)
+    ap.add_argument("--steps", type=int, default=None)
+    ap.add_argument("--bc-steps", type=int, default=None)
+    ap.add_argument("--batch", type=int, default=None)
+    ap.add_argument("--lr", type=float, default=None)
+    ap.add_argument("--cql-alpha", type=float, default=None)
+    ap.add_argument("--out", default=None)
     args = ap.parse_args()
+
+    # config file holds the defaults; explicit CLI flags override it
+    import yaml
+    cfgd = {}
+    if args.config and Path(args.config).exists():
+        cfgd = yaml.safe_load(open(args.config)) or {}
+    def pick(name, fallback):
+        v = getattr(args, name.replace("-", "_"))
+        return v if v is not None else cfgd.get(name, fallback)
+    args.data = pick("data", "offline_pool.npz")
+    args.steps = int(pick("steps", 40000))
+    args.bc_steps = int(pick("bc-steps", 15000))
+    args.batch = int(pick("batch", 256))
+    args.lr = float(pick("lr", 1e-3))
+    args.cql_alpha = float(pick("cql-alpha", 1.0))
+    args.out = pick("out", "logs/offline_results.json")
 
     import random
     torch.manual_seed(0); np.random.seed(0); random.seed(0)  # reproducibility (spec §10)

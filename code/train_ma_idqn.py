@@ -77,17 +77,36 @@ def eval_ma(net, cfg, device, policy="greedy", seeds=EVAL_SEEDS, rng=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--steps", type=int, default=150000)
-    ap.add_argument("--batch", type=int, default=128)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--buffer", type=int, default=100000)
-    ap.add_argument("--warmup", type=int, default=2000)
-    ap.add_argument("--eps-frac", type=float, default=0.4)
-    ap.add_argument("--target-every", type=int, default=1000)
-    ap.add_argument("--eval-every", type=int, default=0,
+    ap.add_argument("--config", default="configs/ma_idqn.yaml",
+                    help="YAML with the hyperparameters (numbers live here, not in code)")
+    ap.add_argument("--steps", type=int, default=None)
+    ap.add_argument("--batch", type=int, default=None)
+    ap.add_argument("--lr", type=float, default=None)
+    ap.add_argument("--buffer", type=int, default=None)
+    ap.add_argument("--warmup", type=int, default=None)
+    ap.add_argument("--eps-frac", type=float, default=None)
+    ap.add_argument("--target-every", type=int, default=None)
+    ap.add_argument("--eval-every", type=int, default=None,
                     help="periodic eval interval (0 = steps//6)")
-    ap.add_argument("--out", default="logs/ma_results.json")
+    ap.add_argument("--out", default=None)
     args = ap.parse_args()
+
+    import yaml
+    cfgd = {}
+    if args.config and Path(args.config).exists():
+        cfgd = yaml.safe_load(open(args.config)) or {}
+    def pick(name, fallback):
+        v = getattr(args, name.replace("-", "_"))
+        return v if v is not None else cfgd.get(name, fallback)
+    args.steps = int(pick("steps", 60000))
+    args.batch = int(pick("batch", 128))
+    args.lr = float(pick("lr", 1e-3))
+    args.buffer = int(pick("buffer", 100000))
+    args.warmup = int(pick("warmup", 2000))
+    args.eps_frac = float(pick("eps-frac", 0.5))
+    args.target_every = int(pick("target-every", 1000))
+    args.eval_every = int(pick("eval-every", 0))
+    args.out = pick("out", "logs/ma_results.json")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     cfg = Config()

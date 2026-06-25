@@ -1,0 +1,12 @@
+# Offline RL (Bölüm 20) — naive DQN / CQL / BC on the pooled D_logs.
+# Numbers live here, not in code. Reproducible: torch.manual_seed(0).
+data: offline_pool.npz
+steps: 40000        # naive ve cql gradient adimi
+bc-steps: 15000     # behavioural cloning adimi
+batch: 256
+lr: 0.001
+cql-alpha: 1.0      # CQL konservatiflik katsayisi
+out: logs/offline_results.json
+# not: obs 181-dim _flatten_obs, havuzdan standardize; done = terminals (d4rl
+# konvansiyonu: truncation/timeout terminal degil, backup'ta bootstrap edilir);
+# eval seeds 0,1,2; cikti weight weights/offline_cql.pt
