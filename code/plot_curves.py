@@ -49,7 +49,7 @@ def plot_methods(groups, col, ylabel, title, out, ymax=None):
         x, m, s = b
         plt.plot(x / 1000, m, label=name, lw=1.8)
         plt.fill_between(x / 1000, m - s, m + s, alpha=0.18)
-    plt.xlabel("training steps (k)"); plt.ylabel(ylabel); plt.title(title)
+    plt.xlabel("training steps (k = 1000)"); plt.ylabel(ylabel); plt.title(title)
     if ymax:
         plt.ylim(top=ymax)
     plt.legend(); plt.grid(alpha=0.25); plt.tight_layout()
