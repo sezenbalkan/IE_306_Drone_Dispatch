@@ -1,462 +1,412 @@
-# IE 306 Term Project — Reinforcement Learning for City-Scale Drone Delivery
-
-**Team:** Sezen Balkan (Role A), Ozan Karhan (Role B), Tuba Nur Büyükata
-(Role C). Offline RL and multi-agent control are joint components.
-
-The primary metric is mean `cost_per_order`; lower is better. Unless stated
-otherwise, the final table uses `configs/eval_standard.yaml` and environment
-seeds 0, 1, and 2. It is reproduced with:
-
-```bash
-python run_all.py --config configs/eval_standard.yaml --seeds 0,1,2
-```
-
-## 1. Baselines
-
-| Policy | cost/order, mean ± std | success rate |
-|---|---:|---:|
-| random | 18.78 ± 1.27 | 0.653 |
-| **greedy_nearest** | **4.57 ± 0.85** | 0.855 |
-| milp_rolling | 4.72 ± 1.38 | 0.836 |
-
-`greedy_nearest` is the required bar. MILP is slightly worse on these seeds
-because its single-epoch Manhattan-distance matching can make poor assignments
-around no-fly geometry.
-
-## 2. Role A — Value-based methods (Sezen Balkan)
-
-### 2.1 Methods
-
-The first implementation used a flat observation vector and a replay-buffer
-DQN. Invalid actions were masked both during action selection and Bellman
-backup. We then introduced Double DQN to separate next-action selection from
-target evaluation, Dueling DQN to separate state value and action advantage,
-and three-step returns to improve delayed credit assignment.
-
-The flat network remained unstable and did not beat greedy. The final Role-A
-method is therefore a **factored Double DQN**. Shared heads score every
-drone-order assignment and every charging action. Features include routed
-pickup/delivery distance, deadline feasibility, battery feasibility, current
-SoC, and global demand. The network is warm-started by supervised imitation of
-the Role-C depth-1 planner, then updated using replay, a target network, and
-Double-DQN TD targets. The warm start is disclosed because presenting it as a
-from-scratch DQN would be misleading.
-
-### 2.2 Results
-
-| Value-based method (3 training seeds) | cost/order | success |
-|---|---:|---:|
-| DQN n=3 | 20.67 ± 6.57 | 0.495 |
-| Double DQN n=3, flat MLP | 6.76 ± 1.80 | 0.749 |
-| Dueling DQN n=3 | 26.07 ± 3.49 | 0.428 |
-| Factored, warm-start only (0 TD steps) | 3.28 ± 0.16 | 0.872 |
-| **Factored Double DQN, best checkpoint** | **2.29 ± 0.41** | **0.883** |
-
-**Baseline comparison (standard eval config).** Per deliverable 5, the shipped
-value-based method is compared head-to-head against all three required
-baselines on `configs/eval_standard.yaml`, eval seeds 0–2:
-
-| Policy | cost/order, mean ± std | success |
-|---|---:|---:|
-| random | 18.78 ± 1.27 | 0.653 |
-| greedy_nearest | 4.57 ± 0.85 | 0.855 |
-| milp_rolling | 4.72 ± 1.38 | 0.836 |
-| **Factored Double DQN (3 seeds)** | **2.29 ± 0.41** | **0.883** |
-
-The factored Double DQN beats `random`, the required `greedy_nearest` bar, and
-`milp_rolling` on both cost and success.
-
-**DQN → Double DQN → Dueling DQN (flat assignment env).** The figures below are
-the required ≥3-seed mean±std learning curves for the three flat value-based
-variants at 600k steps, on both metrics. Double DQN (orange) is the clear winner
-of the family: lowest `cost_per_order` with the tightest seed band (~16–22) and
-the highest `episode_return`; plain DQN (blue) is noisier and ~5–10 cost worse;
-Dueling DQN (green) is the weakest — highest cost, lowest return, and the widest
-±std band (spiking past 40). This ordering is exactly why the flat line was
-carried forward as Double DQN rather than the dueling variant.
-
-![DQN vs Double vs Dueling — cost (600k, 3-seed mean±std)](figures/dqn_family_600k_cost.png)
-
-![DQN vs Double vs Dueling — return (600k, 3-seed mean±std)](figures/dqn_family_600k_return.png)
-
-Crucially, *none* of the three flat variants approaches the greedy bar of 4.57:
-they all plateau around 16–22 cost. Extending the best one (Double DQN) to 3M
-steps confirms both the ceiling and the failure mode — it dips into a good
-~9–10 band between roughly 1.0M and 2.0M steps but never stably beats greedy and
-then **diverges back to ~30** by 3M. This is the value-based bootstrapping
-instability that motivated replacing the flat representation with the factored
-Double DQN.
-
-![Double DQN extended to 3M — good band then divergence (3-seed mean±std)](figures/double_dqn_3m_cost.png)
-
-The TD learning is not cosmetic on top of the warm start. With 0 TD steps the
-network is a pure imitation of the Role-C depth-1 planner; it already beats
-greedy at **3.28 ± 0.16**, but Double-DQN training lowers cost to
-**2.29 ± 0.41** at 5,000 steps — a consistent ~30% reduction in *every* seed
-(3.26→1.72, 3.09→2.65, 3.49→2.50), not a single lucky run. The value updates
-add real improvement over the demonstrator rather than replaying it.
-
-The weakness is stability, not contribution. Pushing all three seeds to 10,000
-steps collapses them to ~32 mean cost (26.2, 33.1, 36.3) with negative return.
-Training guards against this by saving only on validation improvement
-(`save_policy` fires when `cost_per_order` drops), so the saved file is the
-5,000-step checkpoint by construction — not a manual pick — and re-running
-training reproduces the same selection. The single saved model (training seed 0)
-scores **1.72 ± 0.05** over eval seeds 0–2, and `run_all.py` loads exactly that
-file.
-
-![Factored Double DQN learning curve](figures/factored_double_dqn_curve.png)
-
-### 2.3 Required ablation: target network (on the shipped factored method)
-
-The required ablation is run on the factored Double DQN we actually ship, not on
-a discarded flat model. Both runs use the same seed and the identical Role-C
-warm start (step-0 cost = 3.26); they differ only in the target-network delay —
-ON copies the online weights to the target every 1,000 steps, OFF copies them
-every step (no delayed target). Config: `configs/factored_double_dqn.yaml` vs
-`configs/factored_double_dqn_notarget.yaml`.
-
-| Setting | cost @ 5k steps | cost @ 10k steps |
-|---|---:|---:|
-| **Target network ON** (shipped) | **1.72** | 26.23 |
-| Target network OFF | 26.57 | 24.65 |
-
-The effect is decisive. With the delayed target ON, TD training improves the
-warm start from 3.26 down to **1.72** (beating greedy) before its late
-divergence, so a validation checkpoint is recoverable. With it OFF, training
-**immediately destroys** the warm start — cost collapses to 26.57 by 5k steps
-and never recovers, and the factored method produces no greedy-beating
-checkpoint at all. The delayed target is therefore not a minor stabiliser but a
-precondition for this method to learn. This isolates bootstrapping instability
-as the failure mode, and is consistent with the same ablation on the earlier
-flat Double-DQN (ON also beat OFF there, best 10.19 vs 13.18).
-
-### 2.4 What broke
-
-The original flat representation mixed a 20×20 grid with entity rows and a
-large action head. It learned passive charging/no-op behavior and later
-diverged. Increasing training to millions of steps did not fix the
-representation. Factored action scoring supplied the relational information
-needed for assignment. Even then, TD learning could destroy a good warm start,
-which is why validation checkpoints and three training seeds are reported.
-
-On individual ownership: the warm start borrows the Role-C planner as a
-demonstrator, so the warm-start number (3.28) is not independent of Role C. The
-individually-owned value-based contribution is the rest — the factored action
-architecture, the **3.28 → 2.29 improvement the Double-DQN updates produce in
-every seed**, and the instability-and-checkpointing diagnosis. Presenting the
-warm start honestly is deliberate; the value learning is what is defended here.
-
-### 2.5 Held-out robustness and why the flat architecture fails
-
-To check that the factored policy is not tuned to eval seeds 0–2, we ran the
-saved model on held-out seeds 5–7 it never saw during development. It scores
-**1.69 ± 0.67** versus `greedy_nearest` at **3.19 ± 0.51** — essentially the
-same as on the tuned seeds (1.72), so it generalizes rather than overfits. On
-the held-out **stress config** (24×24 grid, `k_max=28`, higher demand, tighter
-deadlines) the same weights still beat greedy, **11.19 ± 0.56** vs **12.02 ±
-1.12**, because the factored network's parameters do not depend on grid size or
-`k_max`. The flat DQN/Double/Dueling models, by contrast, are **config-
-incompatible** there: their hard-wired flat observation and `N·K_max+N+1`
-action head cannot even load on a different grid, so they fail the
-dimension-robustness test outright.
-
-This failure mode is not specific to our environment. A review of the
-literature shows it is a known limitation of value-based methods: as the number
-of discrete actions grows, a flat Q-head loses the ability to generalize across
-actions and its complexity scales linearly with the action count (Dulac-Arnold
-et al., 2015). The standard remedy is exactly what fixed our case — structured /
-factored action representations that exploit the compositional structure of the
-action space, which have been shown to improve substantially over flat
-baselines (Sharma et al., 2017). Our flat-vs-factored result is a concrete
-instance of this published pattern.
-
-### 2.6 Engineering log — what broke and how we diagnosed it
-
-Consolidated from `logs/engineering_log.md`. Each entry is symptom → diagnosis
-(how we found it) → fix, in the order it happened.
-
-1. **Zero charging / random-level policy.** Symptom: first DQN gave
-   `cost_per_order` 17.62 (≈ random 18.78), `charger_utilization = 0.0`, and
-   selected **0** charge actions although charging was available on all 99
-   decision steps. Diagnosis: structural checks (charge actions are indices
-   160–167; the env mask opens them for idle drones with `soc < 1.0`; random and
-   greedy both charge) ruled out a masking/index bug — but the training log
-   showed the run *ended at 5,664 steps with ε still 0.73* (~1,166 updates).
-   So it was an **under-trained policy**, not a reward-shaping problem. Fix:
-   fixed 60k-step budget, ε decayed to 0.05 over 40k steps, and per-episode
-   logging of action mix + cumulative gradient updates.
-
-2. **No-op / over-charge collapse.** Symptom: with the budget fixed, cost
-   *worsened* to 29.39 (success 0.385), the policy spamming 1,039 charge and 683
-   no-op actions. Diagnosis: the visualizer replay (DQN needed 799 decision
-   frames vs greedy's 159) plus a state-vector review found `time` was fed to the
-   network **raw (0–500)** while every other feature was normalized — one input
-   dominating. Fix: reward÷10 in replay, lr 5e-4→1e-4, and a checkpoint-gated
-   `time/T_max` normalization. Result: cost 22.33, success 0.494.
-
-3. **Long-run divergence.** Symptom: a 3M plain-DQN run reached a good band
-   (27.89 at 1.5M) then collapsed back to 80.66 by 3M (1,068 no-ops, 25
-   delivered). Diagnosis: logging `episode_return` against the official
-   `cost_per_order` gave Pearson **−0.961**, ruling out objective misalignment —
-   the problem is **value instability, not the wrong target**; and inspecting
-   `env_dispatch.py:285` (no-op mask set unconditionally) ruled out a
-   `masked_fill(-1e9)` target leak. We stopped at 3M because the issue was
-   stability, not interaction. Side fix: CSV rows are now flushed per-episode so
-   interrupted runs keep their curve.
-
-4. **Credit-assignment bottleneck.** Symptom: persistent no-op collapse (564
-   no-ops). Diagnosis/fix: forward-view **n-step (n=3)** returns crashed no-op
-   564→51 and lifted assignment 260→345, producing the first checkpoint near
-   greedy (cost 6.77) — confirming credit assignment was a real bottleneck. But
-   the post-decay *mean* still sat at random, so n-step was banked as a behavior
-   win and we escalated to **Double DQN** for target stabilization rather than
-   spending more compute on an unstable policy.
-
-5. **Final-weights instability.** Symptom: even Double DQN n=3 at 3M is stable
-   (cost 6.6–13) from ~1M to ~2.5M but diverges afterward (final 20.26). Diagnosis:
-   over three seeds the *final* weights have huge spread (31.0 ± 13.38) while the
-   *best checkpoint* is tight (6.39 ± 0.41). Fix: we ship the validation-selected
-   1M checkpoint, not the final-step weights, and disclose the transfer-risk
-   caveat (grading uses one fixed policy on held-out seeds).
-
-The same diagnose-before-patching loop carried into the factored method:
-the shipped factored Double DQN still let TD updates destroy a good warm start
-(§2.3), which is why validation-checkpointing and three training seeds are
-reported rather than a single final run.
-
-## 3. Role B — Policy-based methods (Ozan Karhan)
-
-### 3.1 Methods
-
-All dispatch methods share a **factored, permutation-invariant** actor-critic
-whose parameters do not depend on the action count, so the same weights load on
-a held-out config with a different `k_max` or grid size. Per-(drone, order)
-features include the no-fly-aware BFS routed distance (drone→pickup,
-pickup→dropoff), deadline feasibility, and battery feasibility, computed only
-from `obs["grid"]` via a self-contained router (`code/role_b/routing.py`), so
-the policy sees the same distance information `greedy_nearest` uses.
-
-REINFORCE uses likelihood-ratio policy gradients with a learned GAE value
-baseline; A2C uses the same network but bootstraps fixed-length rollouts from
-the critic, cutting variance. Invalid dispatch actions are masked. DDPG uses a
-deterministic continuous actor (speed, heading), a Q critic, target networks
-with Polyak averaging, replay, and decaying Ornstein–Uhlenbeck exploration on
-`DroneControl-v0`, with an optional TD3 stabiliser (clipped double-Q, target
-smoothing, delayed updates).
-
-### 3.2 Dispatch results
-
-| Method | cost/order, mean ± std | success |
-|---|---:|---:|
-| REINFORCE + GAE | 2.57 ± 0.86 | 0.903 |
-| **A2C** | **1.09 ± 0.43** | **0.976** |
-
-**Baseline comparison (standard eval config).** Per deliverable 5, both
-policy-based dispatch methods are compared head-to-head against all three
-required baselines on `configs/eval_standard.yaml`, eval seeds 0–2:
-
-| Policy | cost/order, mean ± std | success |
-|---|---:|---:|
-| random | 18.78 ± 1.27 | 0.653 |
-| greedy_nearest | 4.57 ± 0.85 | 0.855 |
-| milp_rolling | 4.72 ± 1.38 | 0.836 |
-| REINFORCE + GAE | 2.57 ± 0.86 | 0.903 |
-| **A2C** | **1.09 ± 0.43** | **0.976** |
-
-Both learned methods beat `random`, `greedy_nearest`, and `milp_rolling` on
-both cost and success.
-
-Both beat greedy (4.57) decisively. A2C reaches the lowest cost with the least
-compute — the textbook payoff of bootstrapping over high-variance Monte-Carlo
-returns. Across the three *training* seeds the saved models give A2C
-**1.55 ± 0.21** and REINFORCE **2.65 ± 0.09**, both beating greedy on every
-seed. REINFORCE was previously seed-sensitive (only ~1/3 of seeds delivered);
-a behavior-cloning warm-start of `greedy_nearest` puts every seed in the
-delivering regime, after which REINFORCE reliably refines *below* greedy. A2C
-needs no warm-start — its bootstrapped advantages are already low-variance.
-
-![Role B dispatch curves](figures/dispatch_curves.png)
-
-### 3.3 Required ablation: GAE λ
-
-The A2C sweep used λ ∈ {0, 0.9, 0.95, 0.99, 1.0}, **three training seeds**, and
-a 40k-step budget.
-
-| λ | mean best validation cost |
-|---:|---:|
-| 0.0 | 13.85 |
-| 0.9 | 0.75 |
-| **0.95** | **0.69** |
-| 0.99 | 0.80 |
-| 1.0 | 1.11 |
-
-This is the textbook bias/variance tradeoff. λ = 0 (one-step TD) is too myopic
-and never beats greedy (13.85); λ = 0.9–0.95 balances bias and variance and is
-optimal (≈0.69); λ = 1.0 (the Monte-Carlo advantage, unbiased but
-high-variance) degrades it again (1.11). This validates the GAE(0.95) default
-used for the headline A2C and REINFORCE runs.
-
-![GAE ablation](figures/ablation_gae.png)
-
-### 3.4 DDPG result
-
-DDPG now **beats go-straight decisively** on `DroneControl-v0`. Over seeds 0–4
-it reaches the target on **every** eval episode (success **1.00**, return
-**+20.70**), while go-straight crashes into no-fly cells (−25 each) and scores
-return **−417.43**, success 0.80. On the validation pool (seeds 200–204) the
-gap is the same: DDPG +12.72 / 1.00 vs go-straight −871.52 / 0.60.
-
-The comparison only collapses on the three "easy" seeds 0–2, where a straight
-path is unobstructed and both controllers reach 100% success (go-straight 26.37,
-DDPG 25.91); the moment a wall lies on the path, go-straight fails and the
-learned obstacle-avoiding DDPG wins. Two fixes were decisive: selecting the
-checkpoint on validation **success** rather than return (the target-reaching
-policy appears late in training and was previously discarded), and decaying OU
-exploration with a minimum-speed floor; an optional TD3 variant reaches the same
-100% success with lower across-seed variance.
-
-A separate engineering fix carried both dispatch methods: reward scaling ×0.1
-plus a Huber value loss. Unscaled targets produced value losses around 25,000
-that drowned the policy gradient, so the agent never learned to charge; with the
-fix `value_loss` dropped to ≈5 and A2C beat greedy within ~10k steps.
-
-![DDPG vs go-straight on DroneControl-v0](figures/ddpg_curve.png)
-
-## 4. Role C — Planning (Tuba Nur Büyükata)
-
-Role C implements a deterministic decision-time planner. It evaluates every
-valid assignment using routed pickup distance, full delivery distance,
-remaining deadline, battery shortfall, order age, and charging readiness.
-All coefficients are stored in `configs/role_c_rollout.yaml`. Routed distances
-are computed by student-side BFS using only the frozen observation grid.
-
-The depth ablation is:
-
-- depth 0: nearest-pickup rule with a battery guard;
-- depth 1: adds delivery distance, deadline risk, and battery feasibility;
-- depth 2: adds post-delivery distance to a charger.
-
-| Method | cost/order | success | on-time | delivered |
-|---|---:|---:|---:|---:|
-| depth 0 | 4.570 | 0.855 | 0.903 | 118.3 |
-| **depth 1** | **2.923** | **0.881** | **0.982** | **126.3** |
-| depth 2 | 3.331 | 0.869 | 0.982 | 124.3 |
-
-Depth 1 is selected. Depth 2 is more conservative and sacrifices good current
-assignments for future charger proximity. The implementation is a shallow
-rollout-style scoring planner, not a full cloned-state MCTS tree; this is a
-deliberate limitation and is stated explicitly.
-
-## 5. Joint component — Offline RL
-
-The pooled dataset contains **420,103 transitions from 3,969 episodes**. Its
-checksum and validation command are in `DATASET.md`. It combines trajectories
-from all three role policies and includes mixed-quality behavior.
-
-Naive offline DQN performs Bellman regression over the static data. Because the
-dataset does not store masks, its maximum ranges over all 169 actions,
-including unsupported actions. CQL adds
-`α(logsumexp Q(s,a) − Q(s,a_data))`; BC directly clones logged actions.
-
-| Method | cost/order, 3 training seeds | success |
-|---|---:|---:|
-| BC | 18.45 ± 3.79 | 0.542 ± 0.058 |
-| naive offline DQN | 13.96 ± 2.72 | 0.537 ± 0.055 |
-| **CQL** | **7.06 ± 1.10** | **0.717 ± 0.030** |
-
-CQL beats both required offline baselines. The selected CQL seed scores 5.72.
-Naive final maximum Q-values were approximately 6,785, 4,170, and 5,982;
-CQL reduced them to 839, 792, and 745. Thus the OOD over-estimation failure is
-visible in every training seed, not only in one lucky run.
-
-![Offline naive-DQN Q-value divergence vs CQL](figures/offline_q_divergence.png)
-
-The figure plots `max Q` over training (seed 0, representative): naive Bellman
-regression climbs past 6,000 as it bootstraps from over-optimistic
-out-of-distribution actions, while CQL's conservative penalty holds it near 800
-and BC stays near zero. This is the required visual demonstration of the
-over-estimation failure and its fix.
-
-CQL does **not** beat `greedy_nearest` (7.06 vs 4.57), and this is expected
-rather than a failure of the method. Offline performance is upper-bounded by the
-behavior policy that generated the data (~60% greedy, ~40% noisy/random), so
-greedy-level cost is the realistic ceiling when learning purely from a
-half-random log. The required offline comparison is against naive-DQN-offline
-and BC — both of which CQL clears decisively.
-
-## 6. Joint component — Multi-agent IDQN
-
-Eight decentralized drone agents share one Q-network and one replay buffer on
-`DroneDispatchMA-v0`. Each receives its local 59-dimensional observation and
-chooses accept, move, charge, or idle. The cost metric now counts on-time
-deliveries from their actual deadlines rather than using a reward threshold.
-
-Three equal 30k-step training runs produced:
-
-| training seed | cost/order | delivered/episode |
-|---:|---:|---:|
-| 0 | 55.33 | 26.0 |
-| 1 | 44.17 | 30.3 |
-| 2 | 17.90 | 71.7 |
-| **mean ± std** | **39.14 ± 15.69** | **42.7 ± 20.6** |
-
-The random MA baseline costs **9.23**, so these equal-budget runs do not
-converge. An earlier extended 60k seed-0 checkpoint reaches **6.65**, delivers
-100.7 orders, and beats random, but it is not presented as a robust three-seed
-result. It also does not beat the best centralized A2C (1.09) or Role-C planner
-(2.92). This corrects the earlier claim that IDQN generally beat the centralized
-policy.
-
-![Multi-agent three-seed curve](figures/ma_idqn_three_seed.png)
-
-The high variance illustrates non-stationarity: from one drone's perspective,
-the other seven agents change their behavior while the shared network learns.
-Parameter sharing reduces but does not remove this moving-target problem.
-
-## 7. Method origins
-
-- **DQN:** Mnih et al., *Human-level control through deep reinforcement
-  learning* (2015), chosen as the canonical replay/target-network value method.
-- **Double DQN:** van Hasselt, Guez & Silver (2016), chosen to reduce
-  max-operator over-estimation.
-- **Dueling DQN:** Wang et al. (2016), chosen to separate state value from
-  action-specific advantage.
-- **REINFORCE:** Williams (1992), the likelihood-ratio policy-gradient baseline.
-- **GAE:** Schulman et al. (2016), chosen for its explicit bias/variance λ knob.
-- **A2C/A3C:** Mnih et al. (2016); we use the synchronous A2C variant.
-- **DDPG:** Lillicrap et al. (2016), chosen for continuous speed/heading actions.
-- **TD3:** Fujimoto et al. (2018), added as a config-gated DDPG stabiliser
-  (clipped double-Q, target smoothing, delayed actor updates).
-- **Rollout planning:** Sutton & Barto, Chapter 8, and Tesauro & Galperin
-  (1996), motivating decision-time policy improvement.
-- **CQL:** Kumar et al. (2020), chosen to penalize unsupported offline actions.
-- **IDQN/parameter sharing:** Tampuu et al. (2017) and Gupta et al. (2017).
-
-## 8. Reproducibility and final assessment
-
-All experimental numbers are in YAML configs; dependencies are pinned.
-`offline_pool.npz` is included with SHA-256 verification. `run_all.py` loads
-the final saved policies for every role and both joint components. The simulator
-tests pass **17/17**.
-
-The strongest methods are A2C, factored Double DQN, and the depth-1 planner.
-DDPG now beats its go-straight baseline (100% target-reaching success on the
-held-out seed range), and offline CQL satisfies the required failure-and-fix
-comparison. The three-seed IDQN remains an honest negative result: it runs
-end-to-end and beats random at 60k steps, but does not converge to the
-centralized policy in an equal training budget.
-
-## References
-
-External sources consulted on why the flat value-based architecture (Section
-2.5) fails on the large discrete assignment action space and why a factored
-representation fixes it:
-
-- Dulac-Arnold, G. et al. (2015). *Deep Reinforcement Learning in Large
-  Discrete Action Spaces.* arXiv:1512.07679.
-  <https://arxiv.org/abs/1512.07679>
-- Sharma, S., Suresh, A., Ramesh, R., Ravindran, B. (2017). *Learning to Factor
-  Policies and Action-Value Functions: Factored Action Space Representations for
-  Deep Reinforcement Learning.* arXiv:1705.07269.
-  <https://arxiv.org/abs/1705.07269>
+**Role A - Value-Based Methods \| Sezen Balkan 220106006033 \| https://github.com/sezenbalkan/IE_306_Drone_Dispatch**
+
+#  Role A 
+
+##  Flat DQN, Double DQN and Dueling DQN
+
+In the first model the drones, the orders, the grid and time dimensions were flattened to generate one 581 dimensional vector which generated one Q-value for all 169 actions. All the invalid actions were masked during both epsilon-greedy action selection and the Bellman update. All three versions of the algorithm used the same replay memory, Smooth L1 loss, gradient clipping and three step return.
+
+*DQN: y = R(n) + gamma\^n (1-d) max_a Q_target(s\',a)*
+
+*Double DQN: a\* = argmax_a Q_online(s\',a), y = R(n) + gamma\^n (1-d) Q_target(s\',a\*)*
+
+*Dueling DQN: Q(s,a) = V(s) + A(s,a) - mean_a A(s,a)*
+
+DDQN takes the selection and evaluation of actions separately, something that is supposed to mitigate the max operator\'s overestimation problem. Dueling DQN on the other hand distinguishes the state value from the value of the action taken within the state. In this scenario, the effectiveness of the assignment is highly dependent on the specific pair of drone and order, making the simple dueling architecture useless for the task.
+
+##  Factored Double DQN
+
+The flat output couldn\'t share information between similar assignments. The final model used a shared scoring network for each drone order pair and separate heads for charging and no op. Pair features include routed pickup and delivery distance, battery feasibility and margin, remaining deadline, state of charge and global demand. This representation clearly shows the relationships that decide if an assignment is feasible and urgent. The factored network was warm started by supervised imitation of the Role C depth 1 planner. It was then improved with replay based Double-DQN updates. The demonstration score and the TD-learning improvement are reported separately to highlight the contribution of the value updates.
+
+  -------------------------------------------------------------------------
+  **Setting**              **Flat family**        **Factored Double DQN**
+  ------------------- -------------------------- --------------------------
+  Network                    MLP 256-256           Shared scorer 128-128
+
+  Replay / batch            100,000 / 128              100,000 / 128
+
+  Discount / return         0.99 / 3-step              0.99 / 1-step
+
+  Learning rate                  1e-4                       3e-4
+
+  Target update           Every 1,000 steps          Every 1,000 steps
+
+  Validation               Every 20k steps             Every 5k steps
+  -------------------------------------------------------------------------
+
+##  Comparison of the Flat Value Based Models
+
+The learning curves average over 3 independent training seeds. Table 3 differentiates between the best validation checkpoint and the last evaluation. This matters as a model may achieve a useful policy temporarily and then degrade as bootstrapped Q targets are estimated poorly.
+
+  ----------------------------------------------------------------------------
+  **Method**                    **Best validation cost**     **Final cost**
+  ---------------------------- -------------------------- --------------------
+  DQN, 600k                           13.87 ± 0.71            19.37 ± 1.19
+
+  Double DQN, 600k                    9.97 ± 0.18             15.81 ± 1.53
+
+  Dueling DQN, 600k                   13.17 ± 6.43            21.80 ± 3.02
+
+  Double DQN, 3M                      6.39 ± 0.41            31.00 ± 13.38
+  ----------------------------------------------------------------------------
+
+  ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  ![](report_media/media/image1.png){width="2.3357458442694665in" height="1.4014479440069991in"}   ![](report_media/media/image2.png){width="2.162397200349956in" height="1.2974376640419947in"}
+  ------------------------------------------------------------------------------------------------ -----------------------------------------------------------------------------------------------
+
+  ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Figure 1. Flat DQN family over 600k steps: validation cost per order (left) and episode return (right), mean ± std over three training seeds.
+
+#  From Flat Double DQN to Factored Double DQN
+
+  -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  ![](report_media/media/image3.png){width="2.4068416447944005in" height="1.4441043307086614in"}   ![](report_media/media/image4.png){width="2.3230107174103236in" height="1.3550896762904636in"}
+  ------------------------------------------------------------------------------------------------ ------------------------------------------------------------------------------------------------
+
+  -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Figure 2. Extended flat Double DQN (left) and factored Double DQN (right). The dashed line in the factored plot is the greedy_nearest benchmark.
+
+  ----------------------------------------------------------------------------------------------------------
+  **Factored model stage**    **Cost/order across training seeds**             **Interpretation**
+  -------------------------- -------------------------------------- ----------------------------------------
+  Warm start, 0 TD steps                  3.28 ± 0.16                Planner imitation already beats greedy
+
+  5,000 TD steps                          2.29 ± 0.41                   About 30% lower than warm start
+
+  10,000 TD steps                         31.90 ± 4.22                        Late TD instability
+  ----------------------------------------------------------------------------------------------------------
+
+The factored architecture made a difference because it applied the same scoring function to all pairs of drones and orders. A valid short distance assignment for one pair could teach the network something it needed for another pair. In fact, the battery and deadline features were quite helpful as they eliminated the need for the model to learn feasibility implicitly from hundred of flattened inputs. This should also account for why the started policy starts below the greedy policy and why a small amount of TD training gets the costs even lower.
+
+While the 3.28 ± 0.16 to 2.29 ± 0.41 gain occurred at all 3 training seeds (3.26 → 1.72, 3.09 → 2.65, 3.49 → 2.50), and TD training adds value above imitation the jump to 31.90 ± 4.22 by 10,000 steps suggests that the representation is solved at least as much as the instability problem in TD. This is why I chose only to save checkpoints with improved validation loss; all three runs saved their 5,000 step checkpoint.
+
+My final run_all.py output tests seed 0 of the best training runs (seed 0) on environment seeds 0--2. It achieves 1.72 ± 0.05 cost/order and 0.914 success. Note that this standard deviation (0.05) is for testing variations among environment seeds, whereas 2.29 ± 0.41 is variation among three training runs.
+
+## Generalization Check
+
+  ----------------------------------------------------------------------------------
+  **Evaluation**                       **Factored Double DQN**   **greedy_nearest**
+  ----------------------------------- ------------------------- --------------------
+  Held-out seeds 5-7                         1.69 ± 0.67            3.19 ± 0.51
+
+  Stress config (24 x 24, k_max=28)         11.19 ± 0.56            12.02 ± 1.12
+  ----------------------------------------------------------------------------------
+
+Similarly, the held out data validates the same causality. This is because the factored model uses shared parameter values to score both entities and pairs and does not use a specific grid vector dimension and number of order slots in its weight vector. Hence it is generalizable to the bigger stress configuration whereas the flat neural nets are hardcoded with a specific input and output dimension.
+
+# Target Network Ablation and Final Assessment
+
+![](report_media/media/image5.png){width="4.498801399825022in" height="2.0909919072615923in"}
+
+Figure 3. Target-network ablation on the shipped factored method. Both runs use training seed 0 and the same warm start; only the target-update delay changes.
+
+  -------------------------------------------------------------------------
+  **Target setting**             **Step 0**    **Step 5k**    **Step 10k**
+  ---------------------------- -------------- -------------- --------------
+  Delayed target ON                 3.26           1.72          26.23
+
+  Delayed target OFF                3.26          26.57          24.65
+  -------------------------------------------------------------------------
+
+In the setting with delayed target model cost reduced from 3.26 to 1.72 at 5k steps. When we update target from online target every step the cost in that period became 26.57. The causal argument is as in usual DQN: changing target slowly helps train stable regression problem where constantly moving target can let estimation error infect future update directly. Given that we make model both worse in both setting when run for 10k steps, it means delay helps delay instability not solve it.
+
+This ablation is run only using 1 training seed so it can not be interpreted as complete statistic comparing but can be interpreted as a diagnostic experiment. Despite that it also shows that it's useful to store some checkpoint in final run but it seems not in no delay version.
+
+##  Overall Comparison and Limitations
+
+There are several findings which are linked together in order of appearance. Double DQN was better than DQN and Dueling DQN since it fixed overestimation problem, while all flat architectures stayed higher than greedy_nearest. Secondly, extending training did not solve the problem and the late divergence appeared which means that the representation problem and bootstrapping were the main issues here. Thirdly, factored pair scoring provided missing relational structure and lowered the cost below greedy one. Lastly, the ablation proved that delayed target network was needed to keep improvement and select a correct checkpoint.
+
+This approach has several weaknesses. It requires Role C demonstration warm start and the best policy is chosen by validation checkpointing. Also, there is only one training seed for target network ablation. These aspects are mentioned explicitly. The individual contribution of the Role A is the flat DQN, Double DQN and Dueling DQN models; the factored Q scoring model; the Double DQN improvement on the demonstrator using replay and instability analysis.
+
+## Method Origins
+
+DQN was selected as the canonical replay and target network value method (Mnih et al., 2015). Double DQN was added to reduce max operator overestimation (van Hasselt et al., 2016), and Dueling DQN was tested to separate state value from action advantage (Wang et al., 2016). The move from a flat action head to shared pair scoring follows the large and factored action space literature, which argues that structured action representations improve generalization across related actions (Dulac-Arnold et al., 2015; Sharma et al., 2017).
+
+**References**: Mnih et al. (2015), Nature 518; van Hasselt, Guez and Silver (2016), AAAI; Wang et al. (2016), ICML; Dulac-Arnold et al. (2015), arXiv:1512.07679; Sharma et al. (2017), arXiv:1705.07269. Experimental values are taken from the repository logs and YAML configurations.
+
+## 
+
+## 1. Problem Description for Role B -- Ozan Karhan 200106006005-https://github.com/ozankarhan/rl-project
+
+The main problem in this project is to control a fleet of delivery drones in a city grid. The drones must pick up orders, deliver them before their deadlines, and also manage their batteries by going to charging stations when needed.
+
+My role focuses on the learning-based decision part of this problem. In every step, the agent must decide what action should be taken: which drone should take which order, which drone should charge, or whether the system should wait. This is difficult because orders arrive randomly, drone batteries decrease over time, and some areas cannot be crossed because of no-fly zones.
+
+For Role B, the main goal is to train policy-based reinforcement learning agents that can make better dispatch decisions than the greedy baseline. The greedy method usually chooses the nearest available drone, but it does not always think about future battery problems or dropped orders. Because of this, it can still cause drone depletion and missed deliveries.
+
+## 2. Baseline Results
+
+First, I compared against the given baselines. The table below shows the standard evaluation result with seeds 0-4.
+
++------------------+------------------+---------------+-------------+-------------------+----------------+--------------------+
+| > **Policy**     | > **Cost/order** | > **Success** | **On-time** | **Depletions/ep** | **Dropped/ep** | > **Delivered/ep** |
++==================+==================+===============+=============+===================+================+====================+
+| > Random         | > 18.498         | > 0.659       | 0.897       | > 8.00            | > 21.2         | > 40.0             |
++------------------+------------------+---------------+-------------+-------------------+----------------+--------------------+
+| > Greedy nearest | > 4.309          | > 0.858       | 0.906       | > 3.60            | > 19.8         | > 120.0            |
++------------------+------------------+---------------+-------------+-------------------+----------------+--------------------+
+| > MILP rolling   | > 4.282          | > 0.853       | 0.910       | > 3.20            | > 20.6         | > 120.6            |
++------------------+------------------+---------------+-------------+-------------------+----------------+--------------------+
+
+The random policy is very bad. Greedy_nearest and milp_rolling are much stronger. So, the real target for my part was to beat greedy_nearest, not only random.
+
+## 3. Methods Used in Role B
+
+I used three learning methods. I tried to keep the design practical for this simulator:
+
+3.1 REINFORCE + GAE
+
+REINFORCE is a policy-gradient method. It tries actions, observes the episode result, and then increases the probability of useful actions. I added GAE because it helps the method use the value function and makes learning less noisy.
+
+At first, REINFORCE was not stable. Some seeds learned badly. To fix this, I used a greedy warm-start. This means the policy first learned to copy greedy_nearest a little, then improved from there. After this, REINFORCE became more reliable.
+
+3.2 A2C
+
+A2C is an actor-critic method. The actor chooses the action, and the critic estimates how good the current state is. This made training more stable than pure REINFORCE.
+
+A2C was the best method in my dispatch results. It delivered more orders and dropped fewer orders than greedy_nearest.
+
+3.3 DDPG
+
+DDPG was not used for the main dispatch environment. It was used for the continuous control sub-environment. In this environment, the agent controls movement, like speed and heading. This is why DDPG is a suitable choice.
+
+The comparison baseline for DDPG was a go-straight controller. DDPG learned to avoid bad movement better and reached the target more successfully.
+
+## 4. Main Dispatch Results
+
+The table below compares the baselines with my Role B methods. The important result is that both REINFORCE + GAE and A2C beat greedy_nearest on cost_per_order.
+
+  --------------------------------------------------------------------------------------------------------
+  **Policy**        **Cost/order**   **Success**   **Depletions/ep**   **Delivered/ep**   **Dropped/ep**
+  ----------------- ---------------- ------------- ------------------- ------------------ ----------------
+  Random            18.498           0.659         8.00                40.0               21.2
+
+  Greedy nearest    4.309            0.858         3.60                120.0              19.8
+
+  MILP rolling      4.282            0.853         3.20                120.6              20.6
+
+  REINFORCE + GAE   2.565            0.907         1.80                128.8              13.4
+
+  A2C               1.735            0.955         1.60                134.0              6.4
+  --------------------------------------------------------------------------------------------------------
+
+A2C was the best one. Its cost_per_order was 1.735, while greedy_nearest was 4.309. This is a large improvement. A2C also delivered more orders and dropped fewer orders.
+
+The improvement mainly comes from fewer dropped orders and fewer battery depletion events. A2C did not only improve the cost number; it also behaved more safely with the drones.
+
+5\. Seed Robustness
+
+Both methods stayed better than greedy_nearest in all three trained seeds. This makes the result more trustworthy than only reporting one best run.
+
+![](report_media/media/image6.png){width="3.199507874015748in" height="1.9859033245844269in"}
+
+## 6. DDPG Control Result
+
+DDPG was tested in the continuous control sub-environment. This is separate from the main dispatch table. The baseline here is go-straight.
+
+  --------------------------------------------------------------------------
+  **Policy**             **Return**      **Success rate**   **Mean steps**
+  ---------------------- --------------- ------------------ ----------------
+  Go-straight            -417.4          0.80               28.4
+
+  DDPG                   +20.7           1.00               17.0
+  --------------------------------------------------------------------------
+
+DDPG reached the target in all evaluation episodes. It also had a positive return, while go-straight had a very negative return because it crashed or made unsafe moves more often.
+
+7\. Ablation Study: GAE Lambda
+
+The required ablation for Role B was a GAE lambda sweep. I tested different lambda values in A2C. This shows how the choice of lambda changes the result.
+
+  -----------------------------------------------------------------------
+  **GAE lambda**                 **Mean best cost/order**
+  ------------------------------ ----------------------------------------
+  0.0                            13.85
+
+  0.9                            0.75
+
+  0.95                           0.69
+
+  0.99                           0.80
+
+  1.0                            1.11
+  -----------------------------------------------------------------------
+
+The best result was around lambda = 0.95. Very small lambda was too short-sighted. Very high lambda was more noisy. So, 0.95 was a good balance in this project.
+
+## 8. What Broke and How I Fixed It
+
+1.  During the project, some parts did not work well at first. REINFORCE was unstable because some random seeds could not learn good delivery behavior. To make it more stable, I used a greedy warm-start before the main training.
+
+2.  Another problem was that the value loss became too large. This made the critic dominate the learning process, so the policy could not improve properly. I fixed this by using reward scaling and Huber loss.
+
+3.  For DDPG, the agent sometimes preferred not to move enough because risky movement could cause to bad penalties. For solve this, I used exploration noise and a minimum speed floor. Also, I noticed that a fixed output model could fail when the action count changed in different configurations. Therefore, I used a more flexible policy design that scores possible actions separately.
+
+## 9. Method Origin Note
+
+I used these methods because they match the type of environment I worked on.
+
+- REINFORCE: Williams (1992). I used it as the basic policy-gradient method.
+
+- GAE: Schulman et al. (2016). I used it to make advantage estimates more useful.
+
+- A2C: based on the actor-critic idea from Mnih et al. (2016). I used it for more stable learning than REINFORCE.
+
+- DDPG: Lillicrap et al. (2016). I used it because the control sub-env has continuous actions.
+
+- TD3: Fujimoto et al. (2018). It was added as a stabilizer for DDPG-style training.
+
+## 10. Conclusion for Role B
+
+In my Role B part, I trained and evaluated policy-based RL methods for the drone delivery project. The main dispatch methods were REINFORCE + GAE and A2C. A2C gave the best result in my section.
+
+The main result is simple: learned policies can beat greedy_nearest when they learn to avoid dropped orders and battery depletion. A2C reduced cost_per_order from 4.309 to 1.735 in the reported standard evaluation.
+
+DDPG also worked well in the control sub-environment. It reached 100% success in the reported evaluation and improved return compared with go-straight.
+
+Overall, Role B was successful because the learned methods improved the main evaluation metric and the experiments were tested with multiple seeds, tables, and ablation results.
+
+## Role C : Planning-Based Rollout Agent
+
+## Tuba Nur Büyükata-200106006009 - https://github.com/runabuyukata/IE_306_Drone_Dispatch\...
+
+## Problem Introduction
+
+In this project, the simulator models a city-scale drone delivery system with stochastic orders, drone batteries, charging hubs, no-fly zones, and delivery deadlines. The operational problem is to decide, in real time, which drone should serve which order, when a drone should charge, and how drones should be positioned for future demand.
+
+My part of the project was Role C, which focuses on planning methods. For this role, we implemented a rollout/lookahead-based planning agent. The main objective was to get better the dispatch decisions compared with the greedy_nearest base. In this environment, simply selecting the nearest order is not always enough because the closest order may cause a late delivery, battery risk, or poor positioning after the delivery.
+
+## Method Overview
+
+The Role C agent uses a rollout-style planning rule. At each decision step, the agent checks the valid actions and scores possible dispatch or charging decisions. The action with the best planning score is selected.
+
+The planner doesn't only consider the closest pickup distance. It also considers the full delivery route, deadline pressure, battery feasibility, order waiting time, and post-delivery charging position. Therefore, the planner is less short-sighted than the greedy_nearest baseline.
+
+The main factors are shown below.
+
+  -------------------------------------------------------------------------------------------
+  **Factor**                        **Purpose**
+  --------------------------------- ---------------------------------------------------------
+  Pickup distance                   Avoids unnecessary long travel to pick up an order
+
+  Delivery distance                 Considers the full pickup-to-dropoff trip
+
+  Deadline risk                     Penalizes actions that may lead to late delivery
+
+  Battery feasibility               Reduces risky assignments with low battery
+
+  Order age                         Gives some priority to waiting orders
+
+  Post-delivery charging distance   Helps the drone remain better positioned after delivery
+  -------------------------------------------------------------------------------------------
+
+## Configuration and Depth Selection
+
+The final Role C configuration uses selected_depth=2. This means the planner does not only evaluate the immediate dispatch action, but also includes a shallow future-awareness term related to the drone's post-delivery charging position.
+
+Depth 2 is a reasonable choice for this problem because battery and charging decisions affect later performance. A one-step greedy decision may look good immediately but may leave the drone far from a charger or in a weak position for the next order. However, the depth was not
+
+increased further because deeper search can become slower and may overfit to the released evaluation setting.
+
+It is also important that the depth is read from the configuration file instead of being hard-coded inside run_all.py. If depth were fixed inside the script, then changing the config would not actually change the experiment. Keeping selected_depth in configs/role_c_rollout.yaml makes the method easier to reproduce, check, and modify.
+
+Ablation: Rollout Depth Selection
+
+The main ablation for Role C is the rollout depth. The final configuration uses selected_depth=2 because it adds a simple future planning term related to the drone's post-delivery charging position. This is useful in the drone delivery environment because a dispatch action that looks good immediately can leave the drone far from a charger after delivery. Depth 2 was selected as a practical balance between short-horizon planning and computational simplicity. We did not fix this value inside the code this value in run_all.py so we can use the same test script again with different depth settings.
+
+## Experimental Setup
+
+The final integrated evaluation was run with \`python run_all.py\`.
+
+The evaluation used configs/eval_standard.yaml with seeds \[0, 1, 2\]. The primary metric is cost_per_order, where lower values indicate better performance. The Role C planner was compared with the standard baselines, especially greedy_nearest, because the project requirement is to improve over this baseline on mean cost per delivered order.
+
+The test command \`python -m pytest -q\` returned 17 passed in 15.36s. This shows that the tested code paths and interfaces run correctly. However, passing tests doesn't prove that the planner is optimal or exactly true to perform best on hidden settings.
+
+## Results and Baseline Comparison
+
+The final results are shown in Table X.
+
+  --------------------------------------------------------------------------
+  **Policy**                  **Cost/order mean ± std**   **Success rate**
+  --------------------------- --------------------------- ------------------
+  random                      18.78 ± 1.27                0.653
+
+  greedy_nearest              4.57 ± 0.85                 0.855
+
+  milp_rolling                4.72 ± 1.38                 0.836
+
+  Role C rollout depth=2      3.33 ± 0.71                 0.869
+  --------------------------------------------------------------------------
+
+**Table X.** Baseline comparison on configs/eval_standard.yaml using seeds \[0, 1, 2\].
+
+The same comparison is visualized in Figure X. Since cost_per_order is a cost metric, lower values are better.
+
+![](report_media/media/image7.png){width="2.63294072615923in" height="1.584877515310586in"}
+
+**Figure X.** Cost per delivered order comparison on configs/eval_standard.yaml with seeds \[0, 1, 2\]. Lower cost/order is better. Role C rollout depth=2 achieved 3.33 ± 0.71 cost/order, while greedy_nearest achieved 4.57 ± 0.85.
+
+The Role C rollout planner improved the primary metric compared with greedy_nearest on the reported evaluation setting. The cost/order decreased from 4.57 ± 0.85 to 3.33 ± 0.71, which corresponds to about a 27% reduction. The success rate also increased a little from 0.855 to 0.869.
+
+**Discussion and Limitations**
+
+These results indicate that even a simple look ahead can improve the greedy dispatch rule in this evaluation setting. The planner performs better than greedy_nearest because it considers deadline risk, battery feasibility, and future charging position in addition to immediate distance.
+
+However, the method is still heuristic. The scoring factors are manually designed, so the method may not generalize perfectly to every demand pattern, city layout, or battery setting. Also, the reported result is based only on eval_standard.yaml and seeds \[0, 1, 2\]. Therefore, we should not say that Role C is the best overall method or that it will always beat the baseline on hidden seeds. The true conclusion is that Role C improves over greedy_nearest on the reported evaluation setting.
+
+**Short Conclusion**
+
+For Role C, we implemented a rollout/lookahead-based planning agent with selected_depth=2. On the reported evaluation setting, the method achieved 3.33 ± 0.71 cost/order, while greedy_nearest achieved 4.57 ± 0.85. This shows that simple planning can improve the greedy dispatch rule in this drone delivery environment.
+
+**Joint component Offline RL**
+
+This pooled data comprises 420,103 transitions from 3,969 episodes. The checksum and validation command for the dataset are at DATASET.md. It encompasses trajectories from all three role policies and comprises mixed-quality behavior.
+
+The simple offline DQN applies Bellman regression onto the fixed dataset. Lacking any masks in the dataset, it takes its max range over all 169 actions, which are not all valid. The CQL policy adds (logsumexp Q(s,a) Q(s,a_data)); BC simply clones the behavior-generated action at (s).
+
+  ------------------------------------------------------------------------
+  Method                    cost/order, 3 training seeds           success
+  ---------------------- ------------------------------- -----------------
+  BC                                        18.45 ± 3.79     0.542 ± 0.058
+
+  naive offline DQN                         13.96 ± 2.72     0.537 ± 0.055
+
+  CQL                                        7.06 ± 1.10     0.717 ± 0.030
+
+                                                         
+  ------------------------------------------------------------------------
+
+![Offline naive-DQN Q-value divergence vs CQL](report_media/media/image8.png){width="6.675in" height="2.975in"} Both offline baselines are inferior to CQL. The chosen CQL seed achieved 5.72. Naive maximum values for final Q were around 6,785, 4,170, and 5,982; CQL lowered those values to 839, 792, and 745, respectively. This shows that the OOD over-estimation problem exists in all seeds during training
+
+The first shows max Q versus training (seed 0, typical), and as we'd expect, naive Bellman overshoots to 6000+ by continually bootstrapped from off-distribution, overoptimistic values, while CQL's penalty clamps max Q near 800, and BC gets near 0. This needed showing in terms of a picture for the overestimation failure and success to avoid. CQL will not get over greedy_nearest (7.06 versus 4.57), which it will not the maximum you can get out of a log created 60% of the time by a 60% probability or maybe 70% greedy policy (and 30% by randomness/some of these values taken uniformly or near greedily is about 60% value if greedy is around .08, it is only 06 value in the log).CQL crushes naive-DQN-offline, as it must: The necessary comparisons however are shown in the second figure: Naïve DQN offline and BC both of which are destroyed by CQL.Joint component Multi agent IDQN.
+
+Eight decentralized drones share one Q-network and one reply buffer on DroneDispatchMA-v0 environment. Every drone has access to local state observation with dimension of 59 and makes an action out of accept, move, charge, or idle. Cost function has been updated to count actual late deliveraies according to original deadlines rather than the prior threshold as penalty.
+
+We used 3 training runs of 30k steps for the training process for each of three equal random initializations.
+
+We observed the following training outcomes:
+
+  ------------------------------------------------------------------------
+          training seed             cost/order           delivered/episode
+  --------------------- ---------------------- ---------------------------
+                      0                  55.33                        26.0
+
+                      1                  44.17                        30.3
+
+                      2                  17.90                        71.7
+
+         **mean ± std**      **39.14 ± 15.69**             **42.7 ± 20.6**
+  ------------------------------------------------------------------------
+
+The randomized MA baseline is priced at 9.23, so these fixed-budget runs did not converge. An earlier seed-0 checkpoint at 60k extends, cost 6.65, generated 100.7 orders and was better than random, but isn't treated as a reliable 3-seed run and falls short of the best central A2C (1.09) and Role-C planner (2.92). This fixes the earlier statement to the effect that IDQN often beat the centralized policy.
+
+![Multi-agent three-seed curve](report_media/media/image9.png){width="7.025in" height="2.8583333333333334in"}
+
+The high variance illustrates nonstationarity: from one drone's perspective, the other seven agents change their behavior while the shared network learns. Parameter sharing reduces but does not remove this moving-target problem.
+
+**\
+Reproducibility and final assessment**
+
+Experimental values in all YAML configs; dependencies are pinned. Checksums of offlinepool.npz available using SHA-256. Runall.py is a script which loads final saved policies of all four roles and two joint controllers; simulator passes all 17 tests. Among the tested algorithms, A2C, double factored DQN, and depth-1 planner work the best. Currently, the DDPG agent surpasses the naïve go-straight policy regarding success rate (reach success 100% in test range); offline CQL is capable of conducting failure and fix tests of the specified type. Three seeds\' IDQN is a reliable negative result algorithm which works end-to-end and is just better than random at 60k timesteps but fails to converge to central policy.
