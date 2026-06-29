@@ -52,6 +52,20 @@ from-scratch DQN would be misleading.
 | Factored, warm-start only (0 TD steps) | 3.28 ± 0.16 | 0.872 |
 | **Factored Double DQN, best checkpoint** | **2.29 ± 0.41** | **0.883** |
 
+**Baseline comparison (standard eval config).** Per deliverable 5, the shipped
+value-based method is compared head-to-head against all three required
+baselines on `configs/eval_standard.yaml`, eval seeds 0–2:
+
+| Policy | cost/order, mean ± std | success |
+|---|---:|---:|
+| random | 18.78 ± 1.27 | 0.653 |
+| greedy_nearest | 4.57 ± 0.85 | 0.855 |
+| milp_rolling | 4.72 ± 1.38 | 0.836 |
+| **Factored Double DQN (3 seeds)** | **2.29 ± 0.41** | **0.883** |
+
+The factored Double DQN beats `random`, the required `greedy_nearest` bar, and
+`milp_rolling` on both cost and success.
+
 **DQN → Double DQN → Dueling DQN (flat assignment env).** The figures below are
 the required ≥3-seed mean±std learning curves for the three flat value-based
 variants at 600k steps, on both metrics. Double DQN (orange) is the clear winner
@@ -157,6 +171,60 @@ action space, which have been shown to improve substantially over flat
 baselines (Sharma et al., 2017). Our flat-vs-factored result is a concrete
 instance of this published pattern.
 
+### 2.6 Engineering log — what broke and how we diagnosed it
+
+Consolidated from `logs/engineering_log.md`. Each entry is symptom → diagnosis
+(how we found it) → fix, in the order it happened.
+
+1. **Zero charging / random-level policy.** Symptom: first DQN gave
+   `cost_per_order` 17.62 (≈ random 18.78), `charger_utilization = 0.0`, and
+   selected **0** charge actions although charging was available on all 99
+   decision steps. Diagnosis: structural checks (charge actions are indices
+   160–167; the env mask opens them for idle drones with `soc < 1.0`; random and
+   greedy both charge) ruled out a masking/index bug — but the training log
+   showed the run *ended at 5,664 steps with ε still 0.73* (~1,166 updates).
+   So it was an **under-trained policy**, not a reward-shaping problem. Fix:
+   fixed 60k-step budget, ε decayed to 0.05 over 40k steps, and per-episode
+   logging of action mix + cumulative gradient updates.
+
+2. **No-op / over-charge collapse.** Symptom: with the budget fixed, cost
+   *worsened* to 29.39 (success 0.385), the policy spamming 1,039 charge and 683
+   no-op actions. Diagnosis: the visualizer replay (DQN needed 799 decision
+   frames vs greedy's 159) plus a state-vector review found `time` was fed to the
+   network **raw (0–500)** while every other feature was normalized — one input
+   dominating. Fix: reward÷10 in replay, lr 5e-4→1e-4, and a checkpoint-gated
+   `time/T_max` normalization. Result: cost 22.33, success 0.494.
+
+3. **Long-run divergence.** Symptom: a 3M plain-DQN run reached a good band
+   (27.89 at 1.5M) then collapsed back to 80.66 by 3M (1,068 no-ops, 25
+   delivered). Diagnosis: logging `episode_return` against the official
+   `cost_per_order` gave Pearson **−0.961**, ruling out objective misalignment —
+   the problem is **value instability, not the wrong target**; and inspecting
+   `env_dispatch.py:285` (no-op mask set unconditionally) ruled out a
+   `masked_fill(-1e9)` target leak. We stopped at 3M because the issue was
+   stability, not interaction. Side fix: CSV rows are now flushed per-episode so
+   interrupted runs keep their curve.
+
+4. **Credit-assignment bottleneck.** Symptom: persistent no-op collapse (564
+   no-ops). Diagnosis/fix: forward-view **n-step (n=3)** returns crashed no-op
+   564→51 and lifted assignment 260→345, producing the first checkpoint near
+   greedy (cost 6.77) — confirming credit assignment was a real bottleneck. But
+   the post-decay *mean* still sat at random, so n-step was banked as a behavior
+   win and we escalated to **Double DQN** for target stabilization rather than
+   spending more compute on an unstable policy.
+
+5. **Final-weights instability.** Symptom: even Double DQN n=3 at 3M is stable
+   (cost 6.6–13) from ~1M to ~2.5M but diverges afterward (final 20.26). Diagnosis:
+   over three seeds the *final* weights have huge spread (31.0 ± 13.38) while the
+   *best checkpoint* is tight (6.39 ± 0.41). Fix: we ship the validation-selected
+   1M checkpoint, not the final-step weights, and disclose the transfer-risk
+   caveat (grading uses one fixed policy on held-out seeds).
+
+The same diagnose-before-patching loop carried into the factored method:
+the shipped factored Double DQN still let TD updates destroy a good warm start
+(§2.3), which is why validation-checkpointing and three training seeds are
+reported rather than a single final run.
+
 ## 3. Role B — Policy-based methods (Ozan Karhan)
 
 ### 3.1 Methods
@@ -183,6 +251,21 @@ smoothing, delayed updates).
 |---|---:|---:|
 | REINFORCE + GAE | 2.57 ± 0.86 | 0.903 |
 | **A2C** | **1.09 ± 0.43** | **0.976** |
+
+**Baseline comparison (standard eval config).** Per deliverable 5, both
+policy-based dispatch methods are compared head-to-head against all three
+required baselines on `configs/eval_standard.yaml`, eval seeds 0–2:
+
+| Policy | cost/order, mean ± std | success |
+|---|---:|---:|
+| random | 18.78 ± 1.27 | 0.653 |
+| greedy_nearest | 4.57 ± 0.85 | 0.855 |
+| milp_rolling | 4.72 ± 1.38 | 0.836 |
+| REINFORCE + GAE | 2.57 ± 0.86 | 0.903 |
+| **A2C** | **1.09 ± 0.43** | **0.976** |
+
+Both learned methods beat `random`, `greedy_nearest`, and `milp_rolling` on
+both cost and success.
 
 Both beat greedy (4.57) decisively. A2C reaches the lowest cost with the least
 compute — the textbook payoff of bootstrapping over high-variance Monte-Carlo
